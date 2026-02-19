@@ -1,108 +1,83 @@
 import cv2
-import threading
 import time
+import multiprocessing
 from detector import Detector
 from monitor import get_system_usage
 from utils import calculate_latency, calculate_fps
 
 # -------------------------------
-# Initialize 3 independent detectors
+# Worker function for each process
 # -------------------------------
-detectors = [Detector() for _ in range(3)]
-
-# -------------------------------
-# Initialize webcam
-# -------------------------------
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 256)
-
-shared_frame = None
-lock = threading.Lock()
-
-# Stream info
-streams = [
-    {"latency": 0, "fps": 0, "prev_time": 0, "frame": None}
-    for _ in range(3)
-]
-
-# -------------------------------
-# Camera reader thread
-# -------------------------------
-def camera_reader():
-    global shared_frame
+def process_worker(index, input_q, output_q):
+    # Initialize detector inside the child process
+    detector = Detector()
+    prev_time = 0
+    
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        with lock:
-            shared_frame = frame.copy()
-
-# -------------------------------
-# Processing threads
-# -------------------------------
-def process_stream(index):
-    global shared_frame
-    detector = detectors[index]
-    while True:
-        frame = None
-        while frame is None:
-            with lock:
-                if shared_frame is not None:
-                    frame = shared_frame.copy()
+        frame = input_q.get() # Waits efficiently for a frame
+        if frame is None: break
 
         start = time.time()
-        results = detector.detect(frame)
+        processed_frame = detector.detect(frame)
         end = time.time()
 
-        streams[index]["latency"] = calculate_latency(start, end)
-        streams[index]["fps"] = calculate_fps(streams[index]["prev_time"], end)
-        streams[index]["prev_time"] = end
-        streams[index]["frame"] = results
+        latency = calculate_latency(start, end)
+        fps = calculate_fps(prev_time, end)
+        prev_time = end
 
-# -------------------------------
-# Start threads
-# -------------------------------
-threading.Thread(target=camera_reader, daemon=True).start()
+        # Send back the frame and metrics
+        output_q.put((index, processed_frame, latency, fps))
 
-for i in range(3):
-    threading.Thread(target=process_stream, args=(i,), daemon=True).start()
+if __name__ == "__main__":
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 256)
 
-# -------------------------------
-# Display loop (main thread)
-# -------------------------------
-while True:
-    cpu, memory = get_system_usage()
+    # Queues for inter-process communication
+    input_queues = [multiprocessing.Queue(maxsize=1) for _ in range(3)]
+    output_queue = multiprocessing.Queue()
 
+    # Start 3 independent processes
+    processes = []
     for i in range(3):
-        frame = streams[i]["frame"]
-        if frame is None:
-            continue
+        p = multiprocessing.Process(target=process_worker, args=(i, input_queues[i], output_queue))
+        p.daemon = True
+        p.start()
+        processes.append(p)
 
-        with lock:
-            display = frame.copy()
+    latest_data = {i: None for i in range(3)}
 
-        cv2.putText(display,
-                    f"Pipeline {i+1} | Lat: {streams[i]['latency']:.1f} ms | FPS: {streams[i]['fps']:.1f}",
-                    (10, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0,255,0),
-                    2)
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret: continue
 
-        cv2.putText(display,
-                    f"CPU: {cpu}% | RAM: {memory}%",
-                    (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0,0,255),
-                    2)
+            # Distribute the same frame to all 3 pipelines
+            for q in input_queues:
+                if q.empty():
+                    q.put(frame.copy())
 
-        # Show each pipeline in its own window
-        cv2.imshow(f"Pipeline {i+1}", display)
+            # Collect results from the output queue
+            while not output_queue.empty():
+                idx, out_frame, lat, fps = output_queue.get()
+                latest_data[idx] = (out_frame, lat, fps)
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+            cpu, memory = get_system_usage()
 
-cv2.destroyAllWindows()
-cap.release()
+            # Display windows
+            for i in range(3):
+                if latest_data[i] is not None:
+                    display, lat, fps = latest_data[i]
+                    
+                    cv2.putText(display, f"Pipeline {i+1} | Lat: {lat:.1f}ms | FPS: {fps:.1f}", 
+                                (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    cv2.putText(display, f"CPU: {cpu}% | RAM: {memory}%", 
+                                (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                    
+                    cv2.imshow(f"Pipeline {i+1}", display)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
