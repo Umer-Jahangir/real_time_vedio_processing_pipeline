@@ -1,34 +1,86 @@
 import cv2
+import numpy as np
 
-def render_streams(streams, cpu, memory):
-    frames = []
 
-    for stream in streams:
-        if stream.frame is None:
-            continue
+def show_frame(
+    window_name,
+    frame,
+    model_latency,
+    e2e_latency,
+    cpu,
+    memory,
+    fps=None,
+):
 
-        frame = stream.frame.copy()
+    h, w = frame.shape[:2]
 
-        cv2.putText(frame,
-                    f"Stream {stream.stream_id} | Lat: {stream.latency:.1f} ms | FPS: {stream.fps:.1f}",
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0,255,0),
-                    2)
+    overlay = frame.copy()
 
-        cv2.putText(frame,
-                    f"CPU: {cpu}% | RAM: {memory}%",
-                    (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0,0,255),
-                    2)
+    box_height = 110
+    box_width = int(w * 0.45)
 
-        frames.append(frame)
+    cv2.rectangle(overlay, (0, 0), (box_width, box_height), (0, 0, 0), -1)
+    alpha = 0.5
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
-    if len(frames) == 3:
-        top = cv2.hconcat([frames[0], frames[1]])
-        bottom = cv2.resize(frames[2], (top.shape[1], frames[2].shape[0]))
-        tiled = cv2.vconcat([top, bottom])
-        cv2.imshow("Multi-Stream AI System", tiled)
+    y0 = 25
+    dy = 22
+
+    cv2.putText(
+        frame,
+        f"Model: {model_latency:.1f} ms",
+        (10, y0),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 255, 0),
+        2,
+    )
+
+    cv2.putText(
+        frame,
+        f"E2E: {e2e_latency:.1f} ms",
+        (10, y0 + dy),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 200, 255),
+        2,
+    )
+
+    cv2.putText(
+        frame,
+        f"CPU: {cpu:.1f}% | RAM: {memory:.1f}%",
+        (10, y0 + 2 * dy),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 0),
+        2,
+    )
+
+    if fps is not None:
+        cv2.putText(
+            frame,
+            f"FPS: {fps:.2f}",
+            (10, y0 + 3 * dy),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 255),
+            2,
+        )
+
+    cv2.imshow(window_name, frame)
+
+
+def show_finished(window_name, width=320, height=256):
+    placeholder = np.zeros((height, width, 3), dtype=np.uint8)
+
+    cv2.putText(
+        placeholder,
+        "Finished",
+        (20, height // 2),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        (0, 255, 0),
+        2,
+    )
+
+    cv2.imshow(window_name, placeholder)

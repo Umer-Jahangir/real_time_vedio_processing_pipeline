@@ -1,232 +1,135 @@
-import cv2
-import time
 import multiprocessing
 import os
 import glob
-import numpy as np
-import statistics
+import time
+import cv2
+from queue import Empty
+import psutil
 
-from detector import Detector
+from worker import process_worker
 from monitor import get_system_usage
-from utils import calculate_latency, calculate_fps
+from display import show_frame, show_finished
+from utils import compute_fps, summarize_latency
 
+REAL_TIME = True
+SPIKE_MODEL_MS = 100       # threshold for model latency spike
+SPIKE_PIPELINE_MS = 150    # threshold for E2E latency spike
 
-def process_worker(index, video_path, output_q, stop_event):
-    cap = cv2.VideoCapture(video_path)
-    
-    # ... info code ...
-    
-    detector = Detector()
-    prev_time = 0
-    frame_count = 0
-    dropped_frames = 0  # Track dropped frames
-    
-    PROCESS_WIDTH = 320
-    PROCESS_HEIGHT = 256
-    loop_count = 0
-    max_loops = 2
-    
-    last_log_time = time.time()
-    
-    while not stop_event.is_set():
-        iteration_start = time.time()
-        
-        ret, frame = cap.read()
-        if not ret:
-            loop_count += 1
-            if loop_count >= max_loops:
-                break
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            continue
-        
-        frame_resized = cv2.resize(frame, (PROCESS_WIDTH, PROCESS_HEIGHT))
-        
-        start = time.time()
-        processed_frame = detector.detect(frame_resized)
-        end = time.time()
-        
-        latency = calculate_latency(start, end)
-        fps = calculate_fps(prev_time, end)
-        prev_time = end
-        
-        frame_count += 1
-        
-        # NON-BLOCKING PUT
-        try:
-            output_q.put_nowait(("frame", index, processed_frame, latency, fps, time.time()))
-        except:
-            dropped_frames += 1  # Count drops
-        
-        # Log every 5 seconds
-        if time.time() - last_log_time > 5.0:
-            print(f"Worker {index}: Processed {frame_count} frames, dropped {dropped_frames}")
-            last_log_time = time.time()
-        
-        # CRITICAL: Check iteration time
-        iteration_time = (time.time() - iteration_start) * 1000
-        if iteration_time > 100:
-            print(f"Worker {index} SLOW ITERATION: {iteration_time:.1f}ms (latency={latency:.1f}ms)")
-    
-    cap.release()
-    print(f"Worker {index} exiting: Processed {frame_count}, dropped {dropped_frames}")
-    
-    # Send done
-    try:
-        output_q.put(("done", index, frame_count), timeout=1.0)
-    except:
-        pass
-
+def get_cpu_stats():
+    cores = psutil.cpu_percent(interval=None, percpu=True)
+    return sum(cores) / len(cores), max(cores)
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn", force=True)
+
     base_dir = os.path.dirname(__file__)
-    videos_dir = os.path.join(base_dir, "vedios")
-    
-    all_videos = sorted(glob.glob(os.path.join(videos_dir, "*")))
-    video_files = [p for p in all_videos if os.path.isfile(p)]
-    
+    videos_dir = os.path.join(base_dir, "videos")
+
+    video_files = sorted([v for v in glob.glob(os.path.join(videos_dir, "*")) if os.path.isfile(v)])
     if not video_files:
-        raise RuntimeError(f"No videos found in {videos_dir}")
-    
+        raise RuntimeError("No video files found.")
+
     num_pipelines = min(4, len(video_files))
-    selected_videos = video_files[:num_pipelines]
-    
-    # BIGGER QUEUE
-    output_queue = multiprocessing.Queue(maxsize=100)
+
+    output_q = multiprocessing.Queue(maxsize=300)
     stop_event = multiprocessing.Event()
-    
-    # Start processes
+
+    # start processes
     processes = []
-    for i, video_path in enumerate(selected_videos):
-        p = multiprocessing.Process(
-            target=process_worker,
-            args=(i, video_path, output_queue, stop_event)
-        )
+    for i in range(num_pipelines):
+        p = multiprocessing.Process(target=process_worker,
+                                    args=(i, video_files[i], output_q, stop_event, REAL_TIME))
         p.start()
         processes.append(p)
-    
-    # Stats
-    stats = {}
-    latest_data = {i: None for i in range(num_pipelines)}
+
+    # Metrics initialization
+    stats = {i: {"frames": 0, "model_latencies": [], "pipeline_latencies": [],
+                 "start_time": None, "end_time": None} for i in range(num_pipelines)}
+    latest_frames = {i: None for i in range(num_pipelines)}
     finished = {i: False for i in range(num_pipelines)}
-    
-    for i in range(num_pipelines):
-        stats[i] = {
-            "frames": 0,
-            "total_latency": 0.0,
-            "min_latency": float("inf"),
-            "max_latency": 0.0,
-            "cpu_samples": [],
-            "mem_samples": [],
-            "first_ts": None,
-            "last_ts": None,
-            "width": None,
-            "height": None,
-            "video_fps": None,
-            "reported_frame_count": 0,
-        }
-    
+    system_cpu = []
+    system_ram = []
+
     try:
         while True:
-            # PRIORITY: Empty queue FAST
-            msgs_processed = 0
-            while not output_queue.empty() and msgs_processed < 100:
-                try:
-                    msg = output_queue.get_nowait()
+            # drain queue
+            try:
+                while True:
+                    msg = output_q.get_nowait()
                     tag = msg[0]
-                    
-                    if tag == "info":
-                        _, idx, w, h, vfps = msg
-                        stats[idx]["width"] = w
-                        stats[idx]["height"] = h
-                        stats[idx]["video_fps"] = vfps
-                    
-                    elif tag == "frame":
-                        _, idx, frame, lat, fpst, ts = msg
-                        
+
+                    if tag == "frame":
+                        _, idx, frame, capture_time, preprocess_latency, model_latency, pipeline_latency = msg
                         s = stats[idx]
+                        if s["start_time"] is None:
+                            s["start_time"] = capture_time
+                        s["end_time"] = capture_time
                         s["frames"] += 1
-                        s["total_latency"] += lat
-                        s["min_latency"] = min(s["min_latency"], lat)
-                        s["max_latency"] = max(s["max_latency"], lat)
-                        if s["first_ts"] is None:
-                            s["first_ts"] = ts
-                        s["last_ts"] = ts
-                        
-                        cpu, memory = get_system_usage()
-                        s["cpu_samples"].append(cpu)
-                        s["mem_samples"].append(memory)
-                        
-                        latest_data[idx] = (frame, lat, fpst)
-                    
+                        s["model_latencies"].append(model_latency)
+                        s["pipeline_latencies"].append(pipeline_latency)
+                        latest_frames[idx] = (frame, model_latency, pipeline_latency)
+
+                        # detect spikes
+                        if model_latency > SPIKE_MODEL_MS:
+                            cpu_avg, cpu_max = get_cpu_stats()
+                            print(f"[MODEL SPIKE] Pipeline {idx+1} | Latency {model_latency:.2f} ms | CPU {cpu_max:.1f}%")
+                        if pipeline_latency > SPIKE_PIPELINE_MS:
+                            cpu_avg, cpu_max = get_cpu_stats()
+                            print(f"[E2E SPIKE] Pipeline {idx+1} | Latency {pipeline_latency:.2f} ms | CPU {cpu_max:.1f}%")
+
                     elif tag == "done":
-                        _, idx, reported_count = msg
+                        _, idx, _, _ = msg
                         finished[idx] = True
-                        stats[idx]["reported_frame_count"] = reported_count
-                        latest_data[idx] = None
-                    
-                    msgs_processed += 1
-                except:
-                    break
-            
-            # Display AFTER emptying queue
+                        latest_frames[idx] = None
+            except Empty:
+                pass
+
+            cpu, ram = get_system_usage(0.2)
+            system_cpu.append(cpu)
+            system_ram.append(ram)
+
+            # display
             for i in range(num_pipelines):
-                if latest_data[i] is not None:
-                    display, lat, fps = latest_data[i]
-                    if display is not None and display.size > 0:
-                        cpu, memory = get_system_usage()
-                        cv2.putText(display, f"Pipeline {i+1} | Lat: {lat:.1f}ms | FPS: {fps:.1f}",
-                                   (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                        cv2.putText(display, f"CPU: {cpu}% | RAM: {memory}%",
-                                   (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                        cv2.imshow(f"Pipeline {i+1}", display)
-                
+                if latest_frames[i] is not None:
+                    frame, model_lat, pipe_lat = latest_frames[i]
+                    duration = (stats[i]["end_time"] - stats[i]["start_time"]) if stats[i]["start_time"] and stats[i]["end_time"] else 1e-6
+                    fps = compute_fps(stats[i]["frames"], duration)
+                    show_frame(f"Pipeline {i+1}", frame, model_lat, pipe_lat, cpu, ram, fps)
                 elif finished[i]:
-                    placeholder = np.zeros((256, 320, 3), dtype=np.uint8)
-                    cv2.putText(placeholder, f"Pipeline {i+1} finished", (10, 130),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    cv2.imshow(f"Pipeline {i+1}", placeholder)
-            
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+                    show_finished(f"Pipeline {i+1}")
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
                 stop_event.set()
                 break
-            
+
             if all(finished.values()):
                 break
-    
+
     finally:
         stop_event.set()
         time.sleep(0.5)
-        
         for p in processes:
-            p.join(timeout=2.0)
+            p.join(timeout=2)
             if p.is_alive():
-                print(f"Force terminating worker {p.pid}")
                 p.terminate()
-        
         cv2.destroyAllWindows()
-        
-        # Report
-        print("\n=== Per-pipeline performance report ===")
+
+        # Final report
+        print("\n=== Performance Report ===")
         for i in range(num_pipelines):
             s = stats[i]
-            frames = s["frames"]
-            duration = 0.0
-            if s["first_ts"] and s["last_ts"] and s["last_ts"] > s["first_ts"]:
-                duration = s["last_ts"] - s["first_ts"]
-            
-            approx_fps = (frames / duration) if duration > 0 else 0.0
-            avg_latency = (s["total_latency"] / frames) if frames > 0 else 0.0
-            min_latency = s["min_latency"] if s["min_latency"] != float("inf") else 0.0
-            max_latency = s["max_latency"]
-            avg_cpu = statistics.mean(s["cpu_samples"]) if s["cpu_samples"] else 0.0
-            avg_mem = statistics.mean(s["mem_samples"]) if s["mem_samples"] else 0.0
-            
-            print(f"Pipeline {i+1} ({selected_videos[i]}):")
-            print(f"  resolution: {s['width']}x{s['height']}")
-            print(f"  source_fps: {s['video_fps']}")
-            print(f"  frames_processed: {frames}")
-            print(f"  reported_frame_count (worker): {s['reported_frame_count']}")
-            print(f"  duration(s): {duration:.2f}")
-            print(f"  approx_fps: {approx_fps:.2f}")
-            print(f"  avg_latency(ms): {avg_latency:.2f}, min: {min_latency:.2f}, max: {max_latency:.2f}")
-            print(f"  avg_cpu_percent: {avg_cpu:.2f}, avg_ram_percent: {avg_mem:.2f}\n")
+            duration = (s["end_time"] - s["start_time"]) if s["start_time"] and s["end_time"] else 0
+            fps = compute_fps(s["frames"], duration)
+            model_avg, model_p95, model_max = summarize_latency(s["model_latencies"])
+            pipe_avg, pipe_p95, pipe_max = summarize_latency(s["pipeline_latencies"])
+            print(f"\nPipeline {i+1}")
+            print(f"  Frames: {s['frames']}")
+            print(f"  FPS: {fps:.2f}")
+            print(f"  Model  -> Avg: {model_avg:.2f} ms | P95: {model_p95:.2f} | Max: {model_max:.2f}")
+            print(f"  E2E    -> Avg: {pipe_avg:.2f} ms | P95: {pipe_p95:.2f} | Max: {pipe_max:.2f}")
+        if system_cpu:
+            avg_cpu = sum(system_cpu) / len(system_cpu)
+            avg_ram = sum(system_ram) / len(system_ram)
+            print("\nSystem Usage:")
+            print(f"  Avg CPU: {avg_cpu:.2f}%")
+            print(f"  Avg RAM: {avg_ram:.2f}%")
