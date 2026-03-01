@@ -15,8 +15,8 @@ REAL_TIME = True
 SPIKE_MODEL_MS = 100       # threshold for model latency spike
 SPIKE_PIPELINE_MS = 150    # threshold for E2E latency spike
 
-def get_cpu_stats():
-    cores = psutil.cpu_percent(interval=None, percpu=True)
+def get_cpu_stats(interval=0.2):
+    cores = psutil.cpu_percent(interval=interval, percpu=True)
     return sum(cores) / len(cores), max(cores)
 
 if __name__ == "__main__":
@@ -29,7 +29,11 @@ if __name__ == "__main__":
     if not video_files:
         raise RuntimeError("No video files found.")
 
-    num_pipelines = min(4, len(video_files))
+    # Get number of physical cores (avoid hyperthreading contention)
+    physical_cores = psutil.cpu_count(logical=False)
+    # Use at most physical cores, but also respect video count
+    num_pipelines = min(physical_cores, len(video_files))
+    print(f"Using {num_pipelines} pipelines (physical cores: {physical_cores})")
 
     output_q = multiprocessing.Queue(maxsize=300)
     stop_event = multiprocessing.Event()
@@ -78,9 +82,15 @@ if __name__ == "__main__":
                             print(f"[E2E SPIKE] Pipeline {idx+1} | Latency {pipeline_latency:.2f} ms | CPU {cpu_max:.1f}%")
 
                     elif tag == "done":
-                        _, idx, _, _ = msg
+                        # Unpack depending on message length (for backward compatibility)
+                        if len(msg) == 5:
+                            _, idx, frame_count, dropped_frames, skipped_frames = msg
+                        else:
+                            _, idx, frame_count, dropped_frames = msg
+                            skipped_frames = 0
                         finished[idx] = True
                         latest_frames[idx] = None
+                        # You could store skipped_frames in stats if you want to track it
             except Empty:
                 pass
 
