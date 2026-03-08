@@ -15,3 +15,10 @@ class Detector:
     def detect(self, frame):
         results = self.model(frame, imgsz=320, verbose=False)
         return results[0].plot()
+
+    def detect_raw(self, frame):
+        """
+        Runs inference and returns the raw Results object (no drawing).
+        """
+        results = self.model(frame, imgsz=320, verbose=False)
+        return results[0]   # return the first (and only) Results object
