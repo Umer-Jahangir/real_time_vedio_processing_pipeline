@@ -1,0 +1,48 @@
+# ============================================================
+# EDGE NODE CONFIG
+# Copy this to: config.yaml (repo root)
+# Run: python -m cctv_agent --server 192.168.1.100
+# ============================================================
+
+node:
+  id: "node_01"                  # CHANGE THIS — unique per machine
+  role: edge
+  max_streams: 4                 # max streams this node can handle
+
+central:
+  host: "192.168.1.100"          # CHANGE THIS — your laptop IP
+  port: 8000
+
+model:
+  path: models/yolov8n_openvino_model
+  imgsz: 320
+  confidence: 0.25
+  warmup_iters: 3
+
+pipeline:
+  frame_height: 256
+  frame_width: 320
+  frame_channels: 3
+  meta_queue_size: 8
+  result_queue_size: 32
+  stall_threshold_ms: 80.0
+  frame_age_limit_ms: 500
+
+decoder:
+  pace_min: 0.02
+  pace_max: 0.08
+  alpha_up: 0.05
+  alpha_down: 0.15
+
+reporter:
+  poll_interval_s: 3.0           # how often to poll central for assignments
+  heartbeat_interval_s: 2.0      # how often to send heartbeat
+  ingest_interval_s: 0.1         # how often to push frames + detections
+
+dashboard:
+  fps_cap: 30
+  log_interval_s: 5.0
+
+logging:
+  level: INFO
+  file: logs/node_01.log         # CHANGE THIS to match your node.id

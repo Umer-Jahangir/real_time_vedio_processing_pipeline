@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CCTV Command Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:      #080c10;
+    --surface: #0d1117;
+    --panel:   #111820;
+    --border:  #1e2d3d;
+    --accent:  #00d4ff;
+    --green:   #00ff88;
+    --warn:    #ffaa00;
+    --danger:  #ff3355;
+    --info:    #7b9cff;
+    --text:    #c9d8e8;
+    --muted:   #4a6080;
+    --mono:    'Share Tech Mono', monospace;
+    --sans:    'Exo 2', sans-serif;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    background:var(--bg); color:var(--text);
+    font-family:var(--sans);
+    height:100vh; overflow:hidden;
+    display:flex; flex-direction:column;
+  }
+
+  body::before {
+    content:''; position:fixed; inset:0;
+    background-image:
+      linear-gradient(rgba(0,212,255,0.025) 1px, transparent 1px),
+      linear-gradient(90deg,rgba(0,212,255,0.025) 1px,transparent 1px);
+    background-size:40px 40px;
+    pointer-events:none; z-index:0;
+  }
+
+  /* ── HEADER ── */
+  header {
+    position:relative; z-index:10;
+    display:flex; align-items:center; justify-content:space-between;
+    padding:0 24px; height:54px;
+    background:rgba(13,17,23,0.98);
+    border-bottom:1px solid var(--border);
+    flex-shrink:0;
+  }
+
+  .logo { display:flex; align-items:center; gap:12px; }
+
+  .logo-icon {
+    width:34px; height:34px;
+    border:1.5px solid var(--accent); border-radius:8px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:16px; animation:glow 3s infinite;
+  }
+
+  @keyframes glow {
+    0%,100%{box-shadow:0 0 8px rgba(0,212,255,.25)}
+    50%    {box-shadow:0 0 20px rgba(0,212,255,.55)}
+  }
+
+  .logo h1 {
+    font-size:14px; font-weight:700;
+    letter-spacing:3px; text-transform:uppercase; color:var(--accent);
+  }
+
+  .logo span {
+    display:block; font-size:9px; color:var(--muted);
+    letter-spacing:2px; font-family:var(--mono); margin-top:1px;
+  }
+
+  .hstats { display:flex; align-items:center; gap:20px; }
+
+  .hchip {
+    display:flex; align-items:center; gap:7px;
+    font-family:var(--mono); font-size:11px;
+  }
+
+  .dot {
+    width:7px; height:7px; border-radius:50%;
+    background:var(--green); animation:blink 1.5s infinite;
+  }
+  .dot.warn   { background:var(--warn); }
+  .dot.danger { background:var(--danger); animation:blink .5s infinite; }
+  .dot.muted  { background:var(--muted); animation:none; }
+
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+  .clock { font-family:var(--mono); font-size:13px; color:var(--accent); letter-spacing:2px; }
+
+  /* ── PAGES ── */
+  .page { display:none; flex:1; overflow:hidden; position:relative; z-index:1; }
+  .page.active { display:flex; }
+
+  /* ── MAIN PAGE LAYOUT ── */
+  #page-main {
+    display:none;
+    flex-direction:row;
+  }
+  #page-main.active { display:flex; }
+
+  /* LEFT SIDEBAR */
+  .sidebar {
+    width:290px; flex-shrink:0;
+    background:var(--surface);
+    border-right:1px solid var(--border);
+    display:flex; flex-direction:column;
+    overflow:hidden;
+  }
+
+  .sidebar-scroll { overflow-y:auto; flex:1; padding:14px; }
+  .sidebar-scroll::-webkit-scrollbar { width:3px; }
+  .sidebar-scroll::-webkit-scrollbar-thumb { background:var(--border); }
+
+  /* CENTER */
+  .center { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:14px; }
+  .center::-webkit-scrollbar { width:4px; }
+  .center::-webkit-scrollbar-thumb { background:var(--border); }
+
+  /* RIGHT PANEL */
+  .right-panel {
+    width:270px; flex-shrink:0;
+    background:var(--surface);
+    border-left:1px solid var(--border);
+    display:flex; flex-direction:column;
+    overflow:hidden;
+  }
+
+  /* ── SECTION TITLE ── */
+  .sec-title {
+    font-family:var(--mono); font-size:9px;
+    letter-spacing:3px; color:var(--accent);
+    text-transform:uppercase;
+    display:flex; align-items:center; gap:7px;
+    padding-bottom:8px;
+    border-bottom:1px solid var(--border);
+    margin-bottom:12px;
+  }
+  .sec-title::before {
+    content:''; width:3px; height:11px;
+    background:var(--accent); display:block;
+  }
+
+  /* ── NODE CARDS ── */
+  .node-card {
+    background:var(--panel); border:1px solid var(--border);
+    border-radius:8px; padding:12px;
+    margin-bottom:9px; position:relative; overflow:hidden;
+    transition:border-color .3s;
+  }
+
+  .node-card::before {
+    content:''; position:absolute;
+    top:0; left:0; right:0; height:2px;
+    background:var(--green);
+    transform:scaleX(0); transform-origin:left;
+    transition:transform .4s;
+  }
+
+  .node-card.online::before { transform:scaleX(1); }
+  .node-card.offline { border-color:var(--danger); opacity:.65; }
+  .node-card.offline::before { background:var(--danger); transform:scaleX(1); }
+
+  .node-top {
+    display:flex; align-items:center;
+    justify-content:space-between; margin-bottom:8px;
+  }
+
+  .node-name { font-family:var(--mono); font-size:13px; font-weight:600; color:#fff; }
+
+  .badge {
+    font-size:9px; font-family:var(--mono);
+    padding:2px 7px; border-radius:3px; letter-spacing:1px;
+  }
+  .badge.online  { background:rgba(0,255,136,.15); color:var(--green); }
+  .badge.offline { background:rgba(255,51,85,.15);  color:var(--danger); }
+
+  .node-meta { font-size:9px; color:var(--muted); font-family:var(--mono); margin-bottom:9px; }
+
+  .meter { margin-bottom:7px; }
+  .meter-row {
+    display:flex; justify-content:space-between;
+    font-size:9px; font-family:var(--mono); color:var(--muted); margin-bottom:3px;
+  }
+  .meter-row span:last-child { color:var(--text); }
+  .meter-bar { height:3px; background:var(--border); border-radius:2px; overflow:hidden; }
+  .meter-fill {
+    height:100%; border-radius:2px;
+    background:linear-gradient(90deg,var(--accent),var(--green));
+    transition:width .5s ease;
+  }
+  .meter-fill.warn   { background:linear-gradient(90deg,var(--warn),#ff6600); }
+  .meter-fill.danger { background:linear-gradient(90deg,var(--danger),#ff6600); }
+
+  .node-bottom {
+    display:flex; justify-content:space-between;
+    margin-top:9px; padding-top:7px;
+    border-top:1px solid var(--border);
+    font-size:9px; font-family:var(--mono); color:var(--muted);
+  }
+  .node-bottom b { color:var(--accent); font-weight:400; }
+
+  /* ── STREAM POOL ── */
+  .stream-item {
+    background:var(--panel); border:1px solid var(--border);
+    border-radius:5px; padding:8px 10px;
+    margin-bottom:6px;
+    display:flex; align-items:center; gap:8px;
+  }
+
+  .sdot {
+    width:7px; height:7px; border-radius:50%;
+    background:var(--muted); flex-shrink:0;
+  }
+  .sdot.live { background:var(--green); animation:blink 1.5s infinite; }
+
+  .surl {
+    font-family:var(--mono); font-size:9px; color:var(--text);
+    flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+
+  .snid { font-family:var(--mono); font-size:9px; color:var(--accent); flex-shrink:0; }
+
+  /* ── FORMS ── */
+  .form-group { margin-bottom:8px; }
+
+  input[type=text], select {
+    width:100%; background:var(--panel);
+    border:1px solid var(--border); border-radius:4px;
+    padding:7px 9px; font-family:var(--mono); font-size:10px;
+    color:var(--text); outline:none; transition:border-color .2s;
+  }
+
+  input[type=text]:focus, select:focus { border-color:var(--accent); }
+  input::placeholder { color:var(--muted); }
+  select option { background:var(--panel); }
+
+  .btn {
+    width:100%; background:transparent;
+    border:1px solid var(--accent); color:var(--accent);
+    padding:7px; border-radius:4px;
+    font-family:var(--mono); font-size:10px;
+    cursor:pointer; transition:all .2s; letter-spacing:1px;
+  }
+  .btn:hover { background:var(--accent); color:var(--bg); }
+
+  /* ── STAT BOXES ── */
+  .statboxes {
+    display:grid; grid-template-columns:repeat(4,1fr); gap:10px;
+  }
+
+  .statbox {
+    background:var(--panel); border:1px solid var(--border);
+    border-radius:7px; padding:12px 14px; position:relative; overflow:hidden;
+  }
+
+  .statbox::after {
+    content:''; position:absolute;
+    bottom:0; left:0; right:0; height:2px;
+    background:linear-gradient(90deg,var(--accent),transparent);
+  }
+
+  .statbox-lbl {
+    font-family:var(--mono); font-size:8px;
+    letter-spacing:2px; color:var(--muted);
+    text-transform:uppercase; margin-bottom:5px;
+  }
+
+  .statbox-val {
+    font-family:var(--mono); font-size:20px;
+    font-weight:700; color:var(--accent);
+  }
+
+  .statbox-unit { font-size:10px; color:var(--muted); margin-left:3px; }
+
+  /* ── STATS TABLE ── */
+  .table-wrap {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:8px; overflow:hidden;
+  }
+
+  .table-head {
+    padding:11px 14px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; justify-content:space-between;
+  }
+
+  table {
+    width:100%; border-collapse:collapse;
+    font-family:var(--mono); font-size:10px;
+  }
+
+  thead th {
+    color:var(--muted); text-align:left;
+    padding:7px 12px; border-bottom:1px solid var(--border);
+    letter-spacing:1px; font-weight:400;
+  }
+
+  tbody td {
+    padding:8px 12px;
+    border-bottom:1px solid rgba(30,45,61,.4);
+    color:var(--text);
+  }
+
+  tbody tr:last-child td { border-bottom:none; }
+
+  tbody tr:hover td { background:rgba(0,212,255,.04); }
+
+  td.accent { color:var(--accent); }
+  td.green  { color:var(--green); }
+  td.warn   { color:var(--warn); }
+  td.danger { color:var(--danger); }
+
+  /* Clickable row */
+  .clickable-row { cursor:pointer; }
+  .clickable-row:hover td { background:rgba(0,212,255,.07); }
+
+  .view-btn {
+    background:transparent; border:1px solid var(--border);
+    color:var(--accent); padding:3px 8px; border-radius:3px;
+    font-family:var(--mono); font-size:9px; cursor:pointer;
+    transition:all .2s; white-space:nowrap;
+  }
+  .view-btn:hover { background:var(--accent); color:var(--bg); border-color:var(--accent); }
+
+  .empty-state {
+    text-align:center; padding:32px;
+    font-family:var(--mono); font-size:10px; color:var(--muted);
+    line-height:2;
+  }
+
+  /* ── ALERTS PANEL ── */
+  .alerts-hdr {
+    padding:13px 14px; border-bottom:1px solid var(--border); flex-shrink:0;
+  }
+
+  .alerts-body { flex:1; overflow-y:auto; padding:8px; }
+  .alerts-body::-webkit-scrollbar { width:3px; }
+  .alerts-body::-webkit-scrollbar-thumb { background:var(--border); }
+
+  .alert-card {
+    border-radius:5px; padding:9px 10px;
+    margin-bottom:6px; border-left:3px solid var(--muted);
+    background:var(--panel);
+    animation:slide-in .3s ease;
+  }
+
+  @keyframes slide-in {
+    from { opacity:0; transform:translateX(16px); }
+    to   { opacity:1; transform:translateX(0); }
+  }
+
+  .alert-card.critical { border-left-color:var(--danger); }
+  .alert-card.warning  { border-left-color:var(--warn); }
+  .alert-card.info     { border-left-color:var(--info); }
+  .alert-card.summary  { border-left-color:var(--accent); }
+
+  .alert-title {
+    font-family:var(--mono); font-size:10px; font-weight:600;
+    margin-bottom:3px; display:flex; align-items:center; gap:5px;
+  }
+
+  .alert-title.critical { color:var(--danger); }
+  .alert-title.warning  { color:var(--warn); }
+  .alert-title.info     { color:var(--info); }
+  .alert-title.summary  { color:var(--accent); }
+
+  .alert-msg { font-family:var(--mono); font-size:9px; color:var(--muted); margin-bottom:3px; }
+
+  .alert-time { font-family:var(--mono); font-size:8px; color:var(--border); }
+
+  .suggestion {
+    margin-top:5px; padding:4px 6px; border-radius:3px;
+    background:rgba(0,212,255,.07);
+    font-family:var(--mono); font-size:8px; color:var(--accent);
+    line-height:1.4;
+  }
+
+  /* ── NODE VIEW PAGE ── */
+  #page-node {
+    display:none; flex-direction:column;
+    background:var(--bg);
+  }
+  #page-node.active { display:flex; }
+
+  .node-view-header {
+    display:flex; align-items:center; gap:16px;
+    padding:12px 20px; background:var(--surface);
+    border-bottom:1px solid var(--border); flex-shrink:0;
+  }
+
+  .back-btn {
+    background:transparent; border:1px solid var(--border);
+    color:var(--accent); padding:6px 12px; border-radius:4px;
+    font-family:var(--mono); font-size:10px; cursor:pointer;
+    transition:all .2s; display:flex; align-items:center; gap:6px;
+  }
+  .back-btn:hover { border-color:var(--accent); background:rgba(0,212,255,.08); }
+
+  .nv-title {
+    font-family:var(--mono); font-size:14px;
+    font-weight:600; color:var(--accent); letter-spacing:2px;
+  }
+
+  .nv-meta { font-family:var(--mono); font-size:10px; color:var(--muted); }
+
+  .nv-stats { display:flex; gap:20px; margin-left:auto; }
+
+  .nv-stat {
+    font-family:var(--mono); font-size:10px; color:var(--muted);
+    display:flex; flex-direction:column; align-items:center; gap:2px;
+  }
+
+  .nv-stat b { font-size:14px; color:var(--accent); font-weight:400; }
+
+  .node-view-body { flex:1; overflow-y:auto; padding:16px; }
+  .node-view-body::-webkit-scrollbar { width:4px; }
+  .node-view-body::-webkit-scrollbar-thumb { background:var(--border); }
+
+  /* ── VIDEO GRID ── */
+  .video-grid {
+    display:grid;
+    grid-template-columns:repeat(auto-fill, minmax(340px,1fr));
+    gap:14px;
+  }
+
+  .vtile {
+    background:var(--panel); border:1px solid var(--border);
+    border-radius:8px; overflow:hidden; position:relative;
+    transition:border-color .3s;
+  }
+
+  .vtile:hover { border-color:var(--accent); }
+
+  /* Scanline */
+  .vtile::after {
+    content:''; position:absolute; inset:0;
+    background:repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0,0,0,.04) 2px, rgba(0,0,0,.04) 4px
+    );
+    pointer-events:none; z-index:2;
+  }
+
+  .vtile-top {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:7px 11px; background:rgba(0,0,0,.45);
+    font-family:var(--mono); font-size:10px; z-index:3; position:relative;
+  }
+
+  .vtile-name { color:var(--accent); }
+  .vtile-fps  { color:var(--green); }
+
+  .vtile img {
+    width:100%; display:block;
+    min-height:190px; background:#000; object-fit:cover;
+  }
+
+  .vtile-bottom {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:6px 11px; background:rgba(0,0,0,.5);
+    font-family:var(--mono); font-size:9px; color:var(--muted);
+    z-index:3; position:relative;
+  }
+
+  .vtile-bottom span { color:var(--text); }
+
+  /* Live indicator */
+  .live-dot {
+    width:6px; height:6px; border-radius:50%;
+    background:var(--green); animation:blink 1s infinite; display:inline-block;
+  }
+
+  .no-feed {
+    width:100%; height:190px;
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    background:#000; color:var(--muted);
+    font-family:var(--mono); font-size:10px; gap:8px;
+  }
+
+  /* Corner accents on tiles */
+  .corner { position:absolute; width:10px; height:10px; z-index:4; }
+  .corner.tl { top:0;    left:0;  border-top:2px solid var(--accent); border-left:2px solid var(--accent); }
+  .corner.tr { top:0;    right:0; border-top:2px solid var(--accent); border-right:2px solid var(--accent); }
+  .corner.bl { bottom:0; left:0;  border-bottom:2px solid var(--accent); border-left:2px solid var(--accent); }
+  .corner.br { bottom:0; right:0; border-bottom:2px solid var(--accent); border-right:2px solid var(--accent); }
+
+  /* ── DIVIDERS ── */
+  .divider { height:1px; background:var(--border); margin:12px 0; }
+
+  /* No-nodes */
+  .no-nodes {
+    font-family:var(--mono); font-size:10px; color:var(--muted);
+    text-align:center; padding:24px 10px; line-height:2;
+  }
+</style>
+</head>
+<body>
+
+<!-- ══ HEADER ══ -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">📡</div>
+    <div>
+      <h1>CCTV Command</h1>
+      <span>Distributed Surveillance System</span>
+    </div>
+  </div>
+  <div class="hstats">
+    <div class="hchip"><div class="dot" id="h-node-dot"></div><span id="h-nodes">0 nodes</span></div>
+    <div class="hchip"><div class="dot" style="background:var(--accent);animation:none"></div><span id="h-streams">0 streams</span></div>
+    <div class="hchip"><div class="dot warn" id="h-alert-dot"></div><span id="h-alerts">0 alerts</span></div>
+    <div class="clock" id="clock">--:--:--</div>
+  </div>
+</header>
+
+<!-- ══ PAGE: MAIN DASHBOARD ══ -->
+<div class="page active" id="page-main">
+
+  <!-- LEFT: nodes + pool -->
+  <div class="sidebar">
+    <div class="sidebar-scroll">
+
+      <div class="sec-title">Node Status</div>
+      <div id="nodes-list"><div class="no-nodes">Waiting for nodes…<br>Start edge agent to connect.</div></div>
+
+      <div class="divider"></div>
+
+      <div class="sec-title">Stream Pool</div>
+      <div id="pool-list"><div style="font-family:var(--mono);font-size:9px;color:var(--muted);padding:4px 0">No streams added yet.</div></div>
+
+      <div class="divider"></div>
+
+      <div class="sec-title">Add Stream</div>
+      <div class="form-group">
+        <input type="text" id="inp-url" placeholder="rtsp://192.168.1.x/stream1 or file path">
+      </div>
+      <button class="btn" onclick="addStream()">+ Add to Pool</button>
+
+      <div class="divider"></div>
+
+      <div class="sec-title">Assign Stream</div>
+      <div class="form-group"><select id="sel-stream"><option value="">-- Select Stream --</option></select></div>
+      <div class="form-group"><select id="sel-node"><option value="">-- Select Node --</option></select></div>
+      <button class="btn" onclick="assignStream()">Assign →</button>
+
+    </div>
+  </div>
+
+  <!-- CENTER: stats -->
+  <div class="center">
+
+    <!-- Stat boxes -->
+    <div class="statboxes">
+      <div class="statbox">
+        <div class="statbox-lbl">Nodes Online</div>
+        <div class="statbox-val" id="sb-nodes">0</div>
+      </div>
+      <div class="statbox">
+        <div class="statbox-lbl">Active Streams</div>
+        <div class="statbox-val" id="sb-streams">0</div>
+      </div>
+      <div class="statbox">
+        <div class="statbox-lbl">Avg FPS</div>
+        <div class="statbox-val" id="sb-fps">0<span class="statbox-unit">fps</span></div>
+      </div>
+      <div class="statbox">
+        <div class="statbox-lbl">Total Alerts</div>
+        <div class="statbox-val" id="sb-alerts">0</div>
+      </div>
+    </div>
+
+    <!-- Stream stats table -->
+    <div class="table-wrap">
+      <div class="table-head">
+        <div class="sec-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0">Stream Statistics</div>
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">Click row → view live streams</span>
+      </div>
+      <div style="padding:6px 8px;overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>STREAM</th>
+              <th>NODE</th>
+              <th>STATUS</th>
+              <th>FPS</th>
+              <th>MODEL LAT</th>
+              <th>E2E LAT</th>
+              <th>LAST SEEN</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="stats-tbody">
+            <tr><td colspan="8" class="empty-state">No stream data yet. Start edge agent.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- RIGHT: alerts -->
+  <div class="right-panel">
+    <div class="alerts-hdr">
+      <div class="sec-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0">Live Alerts</div>
+    </div>
+    <div class="alerts-body" id="alerts-body">
+      <div class="empty-state" style="padding:24px 8px">No alerts yet.</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ══ PAGE: NODE STREAM VIEW ══ -->
+<div class="page" id="page-node">
+  <div class="node-view-header">
+    <button class="back-btn" onclick="showMain()">← Back</button>
+    <div>
+      <div class="nv-title" id="nv-title">NODE</div>
+      <div class="nv-meta" id="nv-meta">—</div>
+    </div>
+    <div class="nv-stats">
+      <div class="nv-stat"><span>CPU</span><b id="nv-cpu">—</b></div>
+      <div class="nv-stat"><span>RAM</span><b id="nv-ram">—</b></div>
+      <div class="nv-stat"><span>FPS</span><b id="nv-fps">—</b></div>
+      <div class="nv-stat"><span>STREAMS</span><b id="nv-sc">—</b></div>
+    </div>
+  </div>
+  <div class="node-view-body">
+    <div class="video-grid" id="video-grid"></div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let currentNode  = null;
+let allStats     = {};
+let allPool      = {};
+let allNodes     = {};
+let lastAlertLen = 0;
+let refreshTimer = null;
+
+// ── Clock ──────────────────────────────────────────────────────────────────
+setInterval(() => {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-GB', {hour12:false});
+}, 1000);
+
+// ── Navigation ─────────────────────────────────────────────────────────────
+function showNode(nodeId) {
+  currentNode = nodeId;
+  document.getElementById('page-main').classList.remove('active');
+  document.getElementById('page-node').classList.add('active');
+  renderNodeView();
+}
+
+function showMain() {
+  currentNode = null;
+  document.getElementById('page-node').classList.remove('active');
+  document.getElementById('page-main').classList.add('active');
+}
+
+// ── Fetch ──────────────────────────────────────────────────────────────────
+async function api(url) {
+  try {
+    const r = await fetch(url);
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
+}
+
+// ── Render nodes ───────────────────────────────────────────────────────────
+function renderNodes(nodes) {
+  allNodes = {};
+  nodes.forEach(n => allNodes[n.node_id] = n);
+
+  const online = nodes.filter(n => n.status === 'online').length;
+  document.getElementById('h-nodes').textContent  = `${online} node${online!==1?'s':''}`;
+  document.getElementById('sb-nodes').textContent = online;
+  document.getElementById('h-node-dot').className = `dot ${online>0?'':'danger'}`;
+
+  const el = document.getElementById('nodes-list');
+  if (!nodes.length) {
+    el.innerHTML = '<div class="no-nodes">Waiting for nodes…<br>Start edge agent to connect.</div>';
+    return;
+  }
+
+  el.innerHTML = nodes.map(n => {
+    const cpu    = n.cpu_pct || 0;
+    const ram    = n.ram_pct || 0;
+    const cpuCls = cpu > 80 ? 'danger' : cpu > 60 ? 'warn' : '';
+    const ramCls = ram > 88 ? 'danger' : ram > 72 ? 'warn' : '';
+    return `
+    <div class="node-card ${n.status}">
+      <div class="node-top">
+        <div class="node-name">${n.node_id}</div>
+        <div class="badge ${n.status}">${n.status.toUpperCase()}</div>
+      </div>
+      <div class="node-meta">${n.hostname} · ${n.cpu_cores} cores · ${n.ram_gb}GB</div>
+      <div class="meter">
+        <div class="meter-row"><span>CPU</span><span>${cpu.toFixed(0)}%</span></div>
+        <div class="meter-bar"><div class="meter-fill ${cpuCls}" style="width:${Math.min(cpu,100)}%"></div></div>
+      </div>
+      <div class="meter">
+        <div class="meter-row"><span>RAM</span><span>${ram.toFixed(0)}%</span></div>
+        <div class="meter-bar"><div class="meter-fill ${ramCls}" style="width:${Math.min(ram,100)}%"></div></div>
+      </div>
+      <div class="node-bottom">
+        <div>STREAMS <b>${n.stream_count||0}</b></div>
+        <div>AVG FPS <b>${(n.avg_fps||0).toFixed(1)}</b></div>
+        <div>PLATFORM <b>${n.platform||'?'}</b></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Update dropdowns
+  const nodeSel = document.getElementById('sel-node');
+  const curNode = nodeSel.value;
+  nodeSel.innerHTML = '<option value="">-- Select Node --</option>' +
+    nodes.filter(n=>n.status==='online').map(n=>
+      `<option value="${n.node_id}" ${n.node_id===curNode?'selected':''}>${n.node_id}</option>`
+    ).join('');
+}
+
+// ── Render stream pool ─────────────────────────────────────────────────────
+function renderPool(pool) {
+  allPool = pool;
+  const urls = Object.keys(pool);
+
+  const el = document.getElementById('pool-list');
+  if (!urls.length) {
+    el.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--muted);padding:4px 0">No streams added yet.</div>';
+  } else {
+    el.innerHTML = urls.map(url => {
+      const nid   = pool[url];
+      const live  = !!nid;
+      const label = url.length > 32 ? '…' + url.slice(-29) : url;
+      return `
+      <div class="stream-item">
+        <div class="sdot ${live?'live':''}"></div>
+        <div class="surl" title="${url}">${label}</div>
+        <div class="snid">${nid||'unassigned'}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // Update stream dropdown
+  const streamSel = document.getElementById('sel-stream');
+  const curStream = streamSel.value;
+  streamSel.innerHTML = '<option value="">-- Select Stream --</option>' +
+    urls.map(u =>
+      `<option value="${u}" ${u===curStream?'selected':''}>${u.length>40?'…'+u.slice(-37):u}</option>`
+    ).join('');
+
+  // Active stream count
+  const active = urls.filter(u=>pool[u]).length;
+  document.getElementById('sb-streams').textContent = active;
+  document.getElementById('h-streams').textContent  = `${active} stream${active!==1?'s':''}`;
+}
+
+// ── Render stats table ─────────────────────────────────────────────────────
+function renderStatsTable(stats, pool) {
+  allStats = stats;
+  const tbody = document.getElementById('stats-tbody');
+  const entries = Object.entries(stats);
+
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No stream data yet. Start edge agent.</td></tr>';
+    document.getElementById('sb-fps').innerHTML = '0<span class="statbox-unit">fps</span>';
+    return;
+  }
+
+  // Avg FPS — only from active streams
+  const fpsList = entries.map(([,s])=>s.fps||0).filter(f=>f>0);
+  const avgFps  = fpsList.length ? (fpsList.reduce((a,b)=>a+b,0)/fpsList.length).toFixed(1) : '0';
+  document.getElementById('sb-fps').innerHTML = `${avgFps}<span class="statbox-unit">fps</span>`;
+
+  const now = Date.now() / 1000;
+
+  tbody.innerHTML = entries.map(([key, s]) => {
+    const parts    = key.split(':');
+    const nodeId   = parts[0];
+    const streamId = parts[1];
+
+    const fps     = (s.fps     || 0).toFixed(1);
+    const modelMs = (s.model_ms|| 0).toFixed(1);
+    const e2eMs   = (s.e2e_ms  || 0).toFixed(1);
+    const ts      = s.timestamp || 0;
+    const age     = ts ? Math.round(now - ts) : null;
+    const ageStr  = age === null ? '—' : age < 5 ? 'live' : `${age}s ago`;
+    const ageCls  = age === null ? '' : age < 5 ? 'green' : age < 15 ? 'warn' : 'danger';
+
+    // Status based on FPS and age
+    const isLive  = age !== null && age < 8 && (s.fps||0) > 1;
+    const status  = isLive ? 'LIVE' : 'STALE';
+    const stsCls  = isLive ? 'green' : 'danger';
+
+    // FPS color
+    const fpsCls  = (s.fps||0) >= 20 ? 'green' : (s.fps||0) >= 10 ? 'warn' : 'danger';
+
+    return `
+    <tr class="clickable-row" onclick="showNode('${nodeId}')">
+      <td class="accent">stream${streamId}</td>
+      <td>${nodeId}</td>
+      <td class="${stsCls}">${status}</td>
+      <td class="${fpsCls}">${fps}</td>
+      <td>${modelMs}ms</td>
+      <td>${e2eMs}ms</td>
+      <td class="${ageCls}">${ageStr}</td>
+      <td><button class="view-btn" onclick="event.stopPropagation();showNode('${nodeId}')">▶ View</button></td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Render alerts ──────────────────────────────────────────────────────────
+function alertIcon(a) {
+  const m = {
+    node_health:   a.level==='critical'?'🔴':a.level==='warning'?'⚠️':'✅',
+    stream_health: a.level==='critical'?'📡':'🔄',
+    performance:   '🐢',
+    summary:       '📊',
+  };
+  return m[a.category] || '💡';
+}
+
+function renderAlerts(alerts) {
+  const count = alerts.length;
+  document.getElementById('sb-alerts').textContent  = count;
+  document.getElementById('h-alerts').textContent   = `${count} alert${count!==1?'s':''}`;
+
+  const crits = alerts.filter(a=>a.level==='critical').length;
+  document.getElementById('h-alert-dot').className  =
+    `dot ${crits>0?'danger':count>0?'warn':'muted'}`;
+
+  if (count === lastAlertLen) return;
+  lastAlertLen = count;
+
+  const el = document.getElementById('alerts-body');
+  if (!count) {
+    el.innerHTML = '<div class="empty-state" style="padding:24px 8px">No alerts yet.</div>';
+    return;
+  }
+
+  el.innerHTML = alerts.slice(0,60).map(a => `
+    <div class="alert-card ${a.level==='info'&&a.category==='summary'?'summary':a.level}">
+      <div class="alert-title ${a.level==='info'&&a.category==='summary'?'summary':a.level}">
+        <span>${alertIcon(a)}</span>${a.title}
+      </div>
+      <div class="alert-msg">${a.message}</div>
+      ${a.suggestion?`<div class="suggestion">💡 ${a.suggestion}</div>`:''}
+      <div class="alert-time">${a.time}${a.node_id?' · '+a.node_id:''}</div>
+    </div>`).join('');
+}
+
+// ── Node view page ─────────────────────────────────────────────────────────
+function renderNodeView() {
+  if (!currentNode) return;
+  const n = allNodes[currentNode];
+
+  document.getElementById('nv-title').textContent = currentNode.toUpperCase();
+  document.getElementById('nv-meta').textContent  = n ? `${n.hostname} · ${n.platform}` : '';
+  document.getElementById('nv-cpu').textContent   = n ? `${(n.cpu_pct||0).toFixed(0)}%` : '—';
+  document.getElementById('nv-ram').textContent   = n ? `${(n.ram_pct||0).toFixed(0)}%` : '—';
+  document.getElementById('nv-fps').textContent   = n ? `${(n.avg_fps||0).toFixed(1)}` : '—';
+  document.getElementById('nv-sc').textContent    = n ? (n.stream_count||0) : '—';
+
+  // Find streams belonging to this node
+  const nodeStreams = Object.entries(allPool)
+    .filter(([,nid]) => nid === currentNode);
+
+  const grid = document.getElementById('video-grid');
+
+  if (!nodeStreams.length) {
+    grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1">No streams assigned to this node.<br>Go back and assign streams from the dashboard.</div>';
+    return;
+  }
+
+  // Preserve existing tiles to avoid MJPEG restart
+  const existing = {};
+  grid.querySelectorAll('.vtile').forEach(t => existing[t.dataset.key] = t);
+  const newKeys = new Set(nodeStreams.map(([url],i)=>`${currentNode}:${i}`));
+
+  // Remove stale tiles
+  Object.entries(existing).forEach(([k,el]) => {
+    if (!newKeys.has(k)) el.remove();
+  });
+
+  nodeStreams.forEach(([url, nodeId], streamId) => {
+    const key    = `${nodeId}:${streamId}`;
+    const s      = allStats[key] || {};
+    const fps    = (s.fps     ||0).toFixed(1);
+    const model  = (s.model_ms||0).toFixed(1);
+    const e2e    = (s.e2e_ms  ||0).toFixed(1);
+    const label  = url.split('/').pop() || `stream${streamId}`;
+    const mjpeg  = `/streams/${nodeId}/${streamId}/mjpeg`;
+    const now    = Date.now()/1000;
+    const age    = s.timestamp ? now - s.timestamp : 999;
+    const isLive = age < 8;
+
+    if (existing[key]) {
+      const t = existing[key];
+      t.querySelector('.vtile-fps').textContent = `${fps} fps`;
+      const spans = t.querySelectorAll('.vtile-bottom span');
+      if (spans[0]) spans[0].textContent = `${model}ms`;
+      if (spans[1]) spans[1].textContent = `${e2e}ms`;
+      return;
+    }
+
+    const tile = document.createElement('div');
+    tile.className   = 'vtile';
+    tile.dataset.key = key;
+    tile.innerHTML   = `
+      <div class="corner tl"></div><div class="corner tr"></div>
+      <div class="corner bl"></div><div class="corner br"></div>
+      <div class="vtile-top">
+        <span class="vtile-name">
+          <span class="live-dot"></span> ${label}
+        </span>
+        <span class="vtile-fps">${fps} fps</span>
+      </div>
+      <img src="${mjpeg}" alt="stream"
+        onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+      <div class="no-feed" style="display:none">
+        <span style="font-size:28px;opacity:.3">📷</span>
+        <span>Stream unavailable</span>
+      </div>
+      <div class="vtile-bottom">
+        Model: <span>${model}ms</span>
+        &nbsp; E2E: <span>${e2e}ms</span>
+        &nbsp; <span style="color:${isLive?'var(--green)':'var(--danger)'}">
+          ${isLive?'● LIVE':'○ STALE'}
+        </span>
+      </div>`;
+    grid.appendChild(tile);
+  });
+}
+
+// ── Stream management ──────────────────────────────────────────────────────
+async function addStream() {
+  const url = document.getElementById('inp-url').value.trim();
+  if (!url) return;
+  const r = await fetch('/streams/add', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({url})
+  });
+  if (r.ok) { document.getElementById('inp-url').value=''; refresh(); }
+}
+
+async function assignStream() {
+  const url    = document.getElementById('sel-stream').value;
+  const nodeId = document.getElementById('sel-node').value;
+  if (!url || !nodeId) return;
+  const r = await fetch('/streams/assign', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({url, node_id:nodeId})
+  });
+  if (r.ok) refresh();
+}
+
+// ── Enter key ──────────────────────────────────────────────────────────────
+document.getElementById('inp-url').addEventListener('keydown', e => {
+  if (e.key === 'Enter') addStream();
+});
+
+// ── Main refresh ───────────────────────────────────────────────────────────
+async function refresh() {
+  const [statsData, alertsData] = await Promise.all([
+    api('/stats'), api('/alerts')
+  ]);
+
+  if (statsData) {
+    renderNodes(statsData.nodes || []);
+    renderPool(statsData.stream_pool || {});
+    renderStatsTable(statsData.stream_stats || {}, statsData.stream_pool || {});
+  }
+
+  if (alertsData) renderAlerts(alertsData.alerts || []);
+
+  // If on node view page, keep it updated
+  if (currentNode) renderNodeView();
+}
+
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+# ============================================================
+# CENTRAL SERVER CONFIG
+# Copy this to: central/config.yaml
+# Run: python server.py (from central/ folder)
+# ============================================================
+
+node:
+  id: "central"
+  role: central
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+
+logging:
+  level: INFO
+  file: logs/central.log
+
+heartbeat:
+  timeout_s: 10
+
+alerts:
+  cpu_high_threshold: 80    # alert when node CPU exceeds this %
+  ram_high_threshold: 88    # alert when node RAM exceeds this %
+  fps_drop_threshold: 0.5   # alert when FPS drops below 50% of expected
+  no_frame_timeout_s: 8     # alert when no frames received for N seconds
+  cooldown_node_cpu_s: 30   # min seconds between CPU alerts per node
+  cooldown_node_ram_s: 30   # min seconds between RAM alerts per node
+  cooldown_stream_s: 15     # min seconds between stream alerts
+  cooldown_fps_s: 20        # min seconds between FPS alerts
+
+recording:
+  enabled: false
+  output_dir: recordings/

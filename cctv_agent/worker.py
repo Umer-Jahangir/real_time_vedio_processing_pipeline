@@ -4,11 +4,13 @@ import numpy as np
 import os
 import psutil
 import queue
+import logging
 import supervision as sv
 from multiprocessing import shared_memory
 
-from detector import Detector
-from utils import now, latency_ms
+from .detector import Detector
+from .utils import now, latency_ms
+from .config import get_config
 
 
 # ============================================================
@@ -16,24 +18,18 @@ from utils import now, latency_ms
 # ============================================================
 
 def get_pcore_logical_ids():
-    """Return list of logical processor IDs that belong to P-cores (heuristic)."""
+    """Return logical processor IDs that belong to P-cores (heuristic)."""
     freqs = psutil.cpu_freq(percpu=True)
     if not freqs or len(freqs) < 2:
         total_logical = psutil.cpu_count(logical=True)
         return list(range(4)) if total_logical > 8 else list(range(total_logical))
-
-    max_freq = max(f.max for f in freqs if f is not None)
+    max_freq  = max(f.max for f in freqs if f is not None)
     threshold = max_freq * 0.9
-    pcores = [i for i, f in enumerate(freqs) if f is not None and f.max >= threshold]
-    return pcores
+    return [i for i, f in enumerate(freqs) if f is not None and f.max >= threshold]
 
 
 def assign_cores_hybrid(worker_index, num_decoders, cores_per_decoder, is_inference=False):
-    """
-    Assign logical cores intelligently:
-    - Inference gets all P-cores.
-    - Decoders get E-cores, round-robin.
-    """
+    """Inference → P-cores. Decoders → E-cores, round-robin."""
     total_logical = psutil.cpu_count(logical=True)
     pcore_ids = get_pcore_logical_ids()
     ecore_ids = [i for i in range(total_logical) if i not in pcore_ids]
@@ -41,12 +37,10 @@ def assign_cores_hybrid(worker_index, num_decoders, cores_per_decoder, is_infere
     if is_inference:
         return pcore_ids
 
-    start = worker_index * cores_per_decoder
-    end = start + cores_per_decoder
+    start, end = worker_index * cores_per_decoder, (worker_index + 1) * cores_per_decoder
     if end > len(ecore_ids):
         print(f"Warning: insufficient E-cores for decoder {worker_index}, using any cores.")
-        all_cores = list(range(total_logical))
-        return all_cores[start:end]
+        return list(range(total_logical))[start:end]
     return ecore_ids[start:end]
 
 
@@ -58,19 +52,20 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
                    meta_queue, stop_event, inference_alive,
                    num_decoders, cores_per_decoder):
     """
-    shm_names: (name_a, name_b) — two shared memory slots for double-buffering.
-    The decoder alternates between them each frame so inference always reads
-    a stable, fully-written buffer.
+    shm_names: (name_a, name_b) — double-buffer slots.
+    Alternates writes between slots so inference always reads a stable buffer.
     """
+    log = logging.getLogger(f"decoder.{index}")
+    cfg = get_config()
 
     p = psutil.Process()
-
     try:
         core_ids = assign_cores_hybrid(index, num_decoders, cores_per_decoder, is_inference=False)
         p.cpu_affinity(core_ids)
         print(f"[Decoder {index}] Pinned to cores {core_ids}")
+        log.info(f"Pinned to cores {core_ids}")
     except Exception as e:
-        print(f"[Decoder {index}] Affinity error: {e}")
+        log.warning(f"Affinity error: {e}")
 
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
     os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
@@ -81,23 +76,21 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
         return cap
 
     cap = open_stream(stream_url)
-
     if not cap.isOpened():
+        log.error(f"Failed to open stream: {stream_url}")
         print(f"[Decoder {index}] Failed to open stream")
         return
 
-    # Open both shared memory slots
     try:
-        shm_slots = [shared_memory.SharedMemory(name=n) for n in shm_names]
-        frame_buffers = [
-            np.ndarray(frame_shape, dtype=np.uint8, buffer=shm.buf)
-            for shm in shm_slots
-        ]
+        shm_slots     = [shared_memory.SharedMemory(name=n) for n in shm_names]
+        frame_buffers = [np.ndarray(frame_shape, dtype=np.uint8, buffer=shm.buf)
+                         for shm in shm_slots]
     except Exception as e:
-        print(f"[Decoder {index}] Shared memory error: {e}")
+        log.error(f"Shared memory error: {e}")
         cap.release()
         return
 
+    log.info("Waiting for inference warmup...")
     print(f"[Decoder {index}] Waiting for inference...")
 
     while not stop_event.is_set() and not inference_alive.is_set():
@@ -109,33 +102,28 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
             shm.close()
         return
 
+    log.info(f"Started — {stream_url}")
     print(f"[Decoder {index}] Started for {stream_url}")
 
-    drop_count = 0
-    stall_count = 0
-    reconnect_delay = 2
+    # ── Pacing from config ────────────────────────────────────────────────────
+    pace_sleep           = 0.033
+    PACE_MIN             = cfg.decoder.pace_min
+    PACE_MAX             = cfg.decoder.pace_max
+    ALPHA_UP             = cfg.decoder.alpha_up
+    ALPHA_DOWN           = cfg.decoder.alpha_down
+    READ_STALL_THRESHOLD = cfg.pipeline.stall_threshold_ms
 
-    pace_sleep = 0.033
-    PACE_MIN = 0.02
-    PACE_MAX = 0.08
-    ALPHA_UP = 0.05
-    ALPHA_DOWN = 0.15
-
-    READ_STALL_THRESHOLD_MS = 80.0
-
-    # For local files pace to the source FPS so the decoder does not spin at
-    # maximum speed and back off to PACE_MAX (80ms = 12.5 FPS).
-    # For RTSP streams cap.read() naturally blocks on the network so adaptive
-    # pacing still applies.
     if os.path.isfile(stream_url):
-        source_fps = cap.get(cv2.CAP_PROP_FPS)
+        source_fps          = cap.get(cv2.CAP_PROP_FPS)
         file_frame_interval = (1.0 / source_fps) if source_fps > 0 else 0.033
-        print(f"[Decoder {index}] Local file — pacing to {source_fps:.1f} FPS "
-              f"({file_frame_interval*1000:.1f}ms/frame)")
+        log.info(f"Local file — pacing to {source_fps:.1f} FPS ({file_frame_interval*1000:.1f}ms/frame)")
+        print(f"[Decoder {index}] Local file — pacing to {source_fps:.1f} FPS ({file_frame_interval*1000:.1f}ms/frame)")
     else:
-        file_frame_interval = 0  # use adaptive pacing for streams
+        file_frame_interval = 0
 
-    buf_idx = 0  # alternates between 0 and 1 each frame
+    drop_count = stall_count = 0
+    reconnect_delay = 2
+    buf_idx = 0
 
     while not stop_event.is_set():
 
@@ -145,67 +133,47 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
 
         read_start = time.perf_counter()
         ret, frame = cap.read()
-        read_ms = (time.perf_counter() - read_start) * 1000
+        read_ms    = (time.perf_counter() - read_start) * 1000
 
         if not ret:
-
             if os.path.isfile(stream_url):
+                log.info("End of file.")
                 print(f"[Decoder {index}] End of file")
                 break
 
+            log.warning(f"Stream lost — reconnecting in {reconnect_delay}s")
             print(f"[Decoder {index}] Reconnecting in {reconnect_delay}s")
-
             cap.release()
             time.sleep(reconnect_delay)
-
             reconnect_delay = min(reconnect_delay * 2, 10)
-
             cap = open_stream(stream_url)
-
             if cap.isOpened():
                 reconnect_delay = 2
-
             continue
 
-        if read_ms > READ_STALL_THRESHOLD_MS:
-
+        if read_ms > READ_STALL_THRESHOLD:
             stall_count += 1
-
             if stall_count % 20 == 0:
-                print(
-                    f"[Decoder {index}] stalled reads={stall_count} "
-                    f"last={read_ms:.0f}ms"
-                )
-
+                log.warning(f"Stalled reads={stall_count} last={read_ms:.0f}ms")
+                print(f"[Decoder {index}] stalled reads={stall_count} last={read_ms:.0f}ms")
             continue
 
         frame_resized = cv2.resize(
-            frame,
-            (frame_shape[1], frame_shape[0]),
+            frame, (frame_shape[1], frame_shape[0]),
             interpolation=cv2.INTER_NEAREST
         )
-
-        # Write into the current buffer slot
         np.copyto(frame_buffers[buf_idx], frame_resized)
 
         sent = False
-
         try:
-            meta_queue.put_nowait({
-                "stream_id": index,
-                "buf_idx": buf_idx,
-                "timestamp": now()
-            })
+            meta_queue.put_nowait({"stream_id": index, "buf_idx": buf_idx, "timestamp": now()})
             sent = True
-
         except queue.Full:
-
             drop_count += 1
-
             if drop_count % 100 == 0:
+                log.warning(f"Dropped {drop_count} frames (queue full)")
                 print(f"[Decoder {index}] dropped {drop_count}")
 
-        # Flip to the other slot for the next frame
         buf_idx ^= 1
 
         try:
@@ -213,8 +181,6 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
         except Exception:
             q_size = 0
 
-        # Local files: fixed interval matching source FPS.
-        # RTSP streams: adaptive pacing based on queue depth.
         if file_frame_interval > 0:
             time.sleep(file_frame_interval)
         else:
@@ -228,11 +194,8 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
     for shm in shm_slots:
         shm.close()
 
-    print(
-        f"[Decoder {index}] Stopped | "
-        f"Dropped={drop_count} | "
-        f"Stalled={stall_count}"
-    )
+    log.info(f"Stopped | Dropped={drop_count} | Stalled={stall_count}")
+    print(f"[Decoder {index}] Stopped | Dropped={drop_count} | Stalled={stall_count}")
 
 
 # ============================================================
@@ -241,35 +204,29 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
 
 def inference_worker(num_streams, frame_shape, shm_names,
                      meta_queues, result_queue, stop_event,
-                     inference_alive,
-                     num_decoders, cores_per_decoder):
+                     inference_alive, num_decoders, cores_per_decoder):
     """
     shm_names: list of (name_a, name_b) tuples, one per stream.
-    Uses buf_idx from metadata to read the correct double-buffer slot.
+    Reads buf_idx from metadata to pick the correct double-buffer slot.
     """
+    log = logging.getLogger("inference")
+    cfg = get_config()
 
     p = psutil.Process()
-
     try:
         core_ids = assign_cores_hybrid(0, num_decoders, cores_per_decoder, is_inference=True)
-
         if not core_ids:
             core_ids = [psutil.cpu_count(logical=False) - 1]
-
         p.cpu_affinity(core_ids)
+        log.info(f"Pinned to cores {core_ids}")
         print(f"[Inference] Pinned to cores {core_ids}")
-
     except Exception as e:
-        print(f"[Inference] Affinity error: {e}")
+        log.warning(f"Affinity error: {e}")
 
-    detector = Detector()
-
+    detector    = Detector()
     class_names = detector.model.names
 
-    # Open 2 shm handles per stream — index as [stream][buf_idx]
-    shm_handles = []
-    frame_buffers = []
-
+    shm_handles, frame_buffers = [], []
     for name_pair in shm_names:
         slots = [shared_memory.SharedMemory(name=n) for n in name_pair]
         shm_handles.append(slots)
@@ -278,49 +235,34 @@ def inference_worker(num_streams, frame_shape, shm_names,
             for shm in slots
         ])
 
-    detector.warmup(3)
+    detector.warmup()
 
     for mq in meta_queues:
         while True:
-            try:
-                mq.get_nowait()
-            except queue.Empty:
-                break
+            try: mq.get_nowait()
+            except queue.Empty: break
 
-    # Initialize ByteTrack trackers
-    trackers = [sv.ByteTrack() for _ in range(num_streams)]
+    trackers        = [sv.ByteTrack() for _ in range(num_streams)]
+    FRAME_AGE_LIMIT = cfg.pipeline.frame_age_limit_ms
 
     inference_alive.set()
-
+    log.info("Ready — decoders can start")
     print("[Inference] Ready — decoders can start")
 
     result_drop_count = 0
 
     while not stop_event.is_set():
 
-        batch_frames = []
-        batch_metadata = []
+        batch_frames, batch_metadata = [], []
 
         for i, mq in enumerate(meta_queues):
-
             try:
-
                 meta = mq.get_nowait()
-
-                age = latency_ms(meta["timestamp"], now())
-
-                if age > 500:
+                if latency_ms(meta["timestamp"], now()) > FRAME_AGE_LIMIT:
                     continue
-
-                # .copy() is the read fence that makes double-buffering safe —
-                # without it the decoder can overwrite the buffer while the
-                # result queue still holds a reference to it.
-                buf_idx = meta["buf_idx"]
-                frame = frame_buffers[i][buf_idx].copy()
-
+                frame = frame_buffers[i][meta["buf_idx"]].copy()
                 batch_frames.append(frame)
                 batch_metadata.append(meta)
-
             except queue.Empty:
                 pass
 
@@ -328,68 +270,46 @@ def inference_worker(num_streams, frame_shape, shm_names,
             stop_event.wait(timeout=0.001)
             continue
 
-        start = now()
-
-        results = detector.detect_raw(batch_frames)
-
-        total_ms = latency_ms(start, now())
+        infer_start  = now()
+        results      = detector.detect_raw(batch_frames)
+        total_ms     = latency_ms(infer_start, now())
         per_frame_ms = total_ms / len(batch_frames)
 
         for i, res in enumerate(results):
-
-            meta = batch_metadata[i]
-
-            boxes = None
-            classes = None
-            confs = None
-            labels = None
-            track_ids = None
+            meta  = batch_metadata[i]
+            boxes = classes = confs = labels = track_ids = None
 
             if res.boxes is not None:
-
-                boxes = res.boxes.xyxy.cpu().numpy()
+                boxes   = res.boxes.xyxy.cpu().numpy()
                 classes = res.boxes.cls.cpu().numpy().astype(int)
-                confs = res.boxes.conf.cpu().numpy()
-                labels = [class_names[int(c)] for c in classes]
+                confs   = res.boxes.conf.cpu().numpy()
+                labels  = [class_names[int(c)] for c in classes]
 
-                detections = sv.Detections(
-                    xyxy=boxes,
-                    confidence=confs,
-                    class_id=classes
-                )
+                detections = sv.Detections(xyxy=boxes, confidence=confs, class_id=classes)
+                tracked    = trackers[meta["stream_id"]].update_with_detections(detections)
 
-                tracked = trackers[meta["stream_id"]].update_with_detections(detections)
-
-                boxes = tracked.xyxy
-                classes = tracked.class_id
-                confs = tracked.confidence
+                boxes     = tracked.xyxy
+                classes   = tracked.class_id
+                confs     = tracked.confidence
                 track_ids = tracked.tracker_id
 
             e2e_lat = latency_ms(meta["timestamp"], now())
 
-            msg = (
-                "frame",
-                meta["stream_id"],
-                batch_frames[i],
-                boxes,
-                track_ids,
-                classes,
-                confs,
-                labels,
-                meta["timestamp"],
-                per_frame_ms,
-                e2e_lat
-            )
+            msg = ("frame", meta["stream_id"], batch_frames[i],
+                   boxes, track_ids, classes, confs, labels,
+                   meta["timestamp"], per_frame_ms, e2e_lat)
 
             try:
                 result_queue.put_nowait(msg)
             except queue.Full:
                 result_drop_count += 1
                 if result_drop_count % 50 == 0:
+                    log.warning(f"Dropped {result_drop_count} results (queue full)")
                     print(f"[Inference] dropped results={result_drop_count}")
 
     for slot_pair in shm_handles:
         for shm in slot_pair:
             shm.close()
 
+    log.info(f"Stopped | Drops={result_drop_count}")
     print(f"[Inference] Stopped | Drops={result_drop_count}")
