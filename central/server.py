@@ -41,6 +41,7 @@ stream_pool:       dict = {}   # stream_url → node_id | None
 latest_frames:     dict = {}   # "node_id:stream_id" → jpeg bytes
 latest_detections: dict = {}   # "node_id:stream_id" → detection list
 stream_stats:      dict = {}   # "node_id:stream_id" → stats dict
+stream_name_cache: dict = {}   # "node_id:stream_id" → real stream filename
 alerts:            list = []   # smart alerts list (last 100)
 
 # ── Detection summary state ───────────────────────────────────────────────────
@@ -74,6 +75,26 @@ def _can_alert(key: str, cooldown: float) -> bool:
         alert_cooldowns[key] = now
         return True
     return False
+
+
+def _stream_name(node_id: str, stream_id) -> str:
+    """Return the real stream filename for a given node+stream_id.
+    Always looks up from pool first (most accurate), falls back to cache.
+    Cache is only used when pool lookup fails (e.g. after stream removal).
+    """
+    key = f"{node_id}:{stream_id}"
+    # Always try pool first — it reflects current assignment
+    assigned = [u for u, nid in stream_pool.items() if nid == node_id]
+    try:
+        url = assigned[int(stream_id)]
+        name = url.replace("\\", "/").replace("\\\\", "/").rstrip("/").split("/")[-1]
+        result = name if name else url
+        stream_name_cache[key] = result  # keep cache in sync
+        return result
+    except (IndexError, ValueError, TypeError):
+        pass
+    # Fall back to cache if pool lookup failed
+    return stream_name_cache.get(key, f"stream{stream_id}")
 
 
 def _push_alert(category: str, level: str, title: str,
@@ -143,10 +164,14 @@ def _check_node_health(node_id: str, info: dict):
 
 
 def _check_stream_health():
-    """Check for missing frames and FPS drops."""
+    """Check for missing frames and FPS drops.
+    Skips nodes that are already marked offline to avoid alert spam."""
     now = time.time()
     for url, node_id in stream_pool.items():
         if not node_id:
+            continue
+        # Skip if node is already offline — watchdog handles that alert
+        if nodes.get(node_id, {}).get("status") == "offline":
             continue
 
         # Find stream index (approximate by position)
@@ -166,8 +191,8 @@ def _check_stream_health():
                 if _can_alert(ckey, COOLDOWN_STREAM):
                     _push_alert(
                         "stream_health", "critical",
-                        f"Stream down on {node_id}",
-                        f"No frames from stream{stream_id} for {NO_FRAME_TIMEOUT}s",
+                        f"Stream offline: {_stream_name(node_id, stream_id)}",
+                        f"No frames received for {NO_FRAME_TIMEOUT}s on {node_id}",
                         node_id=node_id,
                         stream_id=stream_id,
                         suggestion=f"Check camera/source: {url}",
@@ -179,8 +204,8 @@ def _check_stream_health():
                 if _can_alert(ckey, COOLDOWN_FPS):
                     _push_alert(
                         "performance", "warning",
-                        f"Low FPS on {node_id}/stream{stream_id}",
-                        f"FPS dropped to {fps:.1f} (expected ~25)",
+                        f"Low FPS on {node_id}/{_stream_name(node_id, stream_id)}",
+                        f"FPS dropped to {fps:.1f} on {_stream_name(node_id, stream_id)} (expected ~25)",
                         node_id=node_id,
                         stream_id=stream_id,
                         suggestion="Node may be overloaded — check CPU usage",
@@ -203,7 +228,7 @@ def _check_detection_summary():
                           sorted(counts.items(), key=lambda x: -x[1]))
         _push_alert(
             "summary", "info",
-            f"60s Summary — {node_id}/stream{stream_id}",
+            f"60s Summary — {node_id}/{_stream_name(node_id, stream_id)}",
             parts,
             node_id=node_id,
             stream_id=stream_id,
@@ -271,6 +296,11 @@ async def register(request: Request):
     }
     log.info(f"Node registered: {node_id}")
 
+    # Clear stale stream name cache for this node — pipeline may have new assignments
+    stale_keys = [k for k in stream_name_cache if k.startswith(f"{node_id}:")]
+    for k in stale_keys:
+        del stream_name_cache[k]
+
     if was_offline:
         _push_alert(
             "node_health", "info",
@@ -335,13 +365,19 @@ async def ingest_detections(request: Request):
     key       = f"{node_id}:{stream_id}"
 
     latest_detections[key] = data.get("detections", [])
+
+    # Always update cache — stream assignments can change after pipeline restart
+    resolved_name = _stream_name(node_id, stream_id)
+    stream_name_cache[key] = resolved_name
+
     stream_stats[key] = {
-        "fps":       data.get("fps",       0.0),
-        "model_ms":  data.get("model_ms",  0.0),
-        "e2e_ms":    data.get("e2e_ms",    0.0),
-        "timestamp": data.get("timestamp", time.time()),
-        "node_id":   node_id,
-        "stream_id": stream_id,
+        "fps":        data.get("fps",       0.0),
+        "model_ms":   data.get("model_ms",  0.0),
+        "e2e_ms":     data.get("e2e_ms",    0.0),
+        "timestamp":  time.time(),   # always use SERVER time — avoids browser clock skew
+        "node_id":    node_id,
+        "stream_id":  stream_id,
+        "stream_name": resolved_name,   # filename only, always correct
     }
 
     # Accumulate detection counts for summary
@@ -400,9 +436,29 @@ async def add_stream(request: Request):
 
 @app.post("/streams/remove")
 async def remove_stream(request: Request):
-    data = await request.json()
-    url  = data.get("url")
+    data    = await request.json()
+    url     = data.get("url")
+    node_id = stream_pool.get(url)  # get node before removing
+    name    = url.replace("\\", "/").rstrip("/").split("/")[-1] or url
+
+    # Find stream_id before removing so we can clean up cache
+    if node_id:
+        assigned = [u for u, nid in stream_pool.items() if nid == node_id]
+        try:
+            sid = assigned.index(url)
+            stream_name_cache.pop(f"{node_id}:{sid}", None)
+        except ValueError:
+            pass
+
     stream_pool.pop(url, None)
+    log.info(f"Stream removed: {url}")
+    _push_alert(
+        "stream_health", "warning",
+        f"Stream removed: {name}",
+        f"{name} removed from pool" + (f" — was on {node_id}" if node_id else ""),
+        node_id=node_id,
+        suggestion="Stream will no longer be processed. Re-add if needed." if node_id else None,
+    )
     return {"status": "ok"}
 
 
@@ -417,10 +473,11 @@ async def assign_stream(request: Request):
         raise HTTPException(404, f"Node '{node_id}' not registered")
     stream_pool[url] = node_id
     log.info(f"Assigned {url} → {node_id}")
+    name = url.replace("\\", "/").rstrip("/").split("/")[-1] or url
     _push_alert(
         "stream_health", "info",
-        f"Stream assigned",
         f"Stream assigned to {node_id}",
+        f"{name} is now being processed by {node_id}",
         node_id=node_id,
         suggestion=None,
     )
@@ -440,12 +497,20 @@ async def get_stats():
         "stream_pool":  stream_pool,
         "stream_stats": stream_stats,
         "alert_count":  len(alerts),
+        "server_time":  time.time(),   # let dashboard compute accurate age
     }
 
 
 @app.get("/alerts")
 async def get_alerts():
     return {"alerts": list(reversed(alerts))}
+
+
+@app.post("/alerts/clear")
+async def clear_alerts():
+    alerts.clear()
+    log.info("Alerts cleared by user.")
+    return {"status": "ok"}
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
