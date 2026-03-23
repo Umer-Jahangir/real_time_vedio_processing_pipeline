@@ -7,14 +7,14 @@
 node:
   id: "node_01"                  # CHANGE THIS — unique per machine
   role: edge
-  max_streams: 4                 # max streams this node can handle
+  max_streams: 3                 # max streams this node can handle
 
 central:
   host: "192.168.1.100"          # CHANGE THIS — your laptop IP
   port: 8000
 
 model:
-  path: models/yolov8n_openvino_model
+  path: src/models/yolov8n_openvino_model
   imgsz: 320
   confidence: 0.25
   warmup_iters: 3
@@ -24,7 +24,7 @@ pipeline:
   frame_width: 320
   frame_channels: 3
   meta_queue_size: 8
-  result_queue_size: 32
+  result_queue_size: 512
   stall_threshold_ms: 80.0
   frame_age_limit_ms: 500
 
