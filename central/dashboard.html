@@ -226,6 +226,18 @@
 
   .snid { font-family:var(--mono); font-size:9px; color:var(--accent); flex-shrink:0; }
 
+  /* ── REMOVE BUTTON (NEW) ── */
+  .remove-btn {
+    background:transparent; border:1px solid var(--border);
+    color:var(--muted); padding:2px 6px; border-radius:3px;
+    font-family:var(--mono); font-size:9px; cursor:pointer;
+    transition:all .2s; flex-shrink:0; line-height:1.4;
+  }
+  .remove-btn:hover {
+    border-color:var(--danger); color:var(--danger);
+    background:rgba(255,51,85,.08);
+  }
+
   /* ── FORMS ── */
   .form-group { margin-bottom:8px; }
 
@@ -498,6 +510,56 @@
     font-family:var(--mono); font-size:10px; color:var(--muted);
     text-align:center; padding:24px 10px; line-height:2;
   }
+
+  /* ── CUSTOM CONFIRM MODAL ── */
+  .modal-overlay {
+    display:none; position:fixed; inset:0; z-index:1000;
+    background:rgba(0,0,0,.7); backdrop-filter:blur(4px);
+    align-items:center; justify-content:center;
+  }
+  .modal-overlay.show { display:flex; }
+  .modal-box {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:10px; padding:28px 32px; min-width:320px; max-width:420px;
+    position:relative; box-shadow:0 0 40px rgba(0,0,0,.6);
+    animation:modal-in .2s ease;
+  }
+  @keyframes modal-in { from{opacity:0;transform:scale(.94)} to{opacity:1;transform:scale(1)} }
+  .modal-box::before {
+    content:''; position:absolute; top:0; left:0; right:0; height:2px;
+    background:linear-gradient(90deg,var(--danger),transparent);
+    border-radius:10px 10px 0 0;
+  }
+  .modal-icon { font-size:28px; margin-bottom:12px; display:block; }
+  .modal-title {
+    font-family:var(--mono); font-size:13px; font-weight:600;
+    color:var(--danger); letter-spacing:1px; margin-bottom:8px;
+  }
+  .modal-msg {
+    font-family:var(--mono); font-size:10px; color:var(--muted);
+    line-height:1.7; margin-bottom:6px;
+  }
+  .modal-url {
+    font-family:var(--mono); font-size:10px; color:var(--accent);
+    background:var(--panel); border:1px solid var(--border);
+    border-radius:4px; padding:6px 10px; margin-bottom:20px;
+    word-break:break-all;
+  }
+  .modal-btns { display:flex; gap:10px; justify-content:flex-end; }
+  .modal-btn-cancel {
+    background:transparent; border:1px solid var(--border);
+    color:var(--muted); padding:8px 18px; border-radius:4px;
+    font-family:var(--mono); font-size:10px; cursor:pointer;
+    transition:all .2s;
+  }
+  .modal-btn-cancel:hover { border-color:var(--accent); color:var(--accent); }
+  .modal-btn-confirm {
+    background:rgba(255,51,85,.15); border:1px solid var(--danger);
+    color:var(--danger); padding:8px 18px; border-radius:4px;
+    font-family:var(--mono); font-size:10px; cursor:pointer;
+    transition:all .2s;
+  }
+  .modal-btn-confirm:hover { background:var(--danger); color:#fff; }
 </style>
 </head>
 <body>
@@ -606,8 +668,9 @@
 
   <!-- RIGHT: alerts -->
   <div class="right-panel">
-    <div class="alerts-hdr">
+    <div class="alerts-hdr" style="display:flex;align-items:center;justify-content:space-between">
       <div class="sec-title" style="margin-bottom:0;border-bottom:none;padding-bottom:0">Live Alerts</div>
+      <button onclick="clearAlerts()" style="background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 8px;border-radius:3px;font-family:var(--mono);font-size:9px;cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor='var(--danger)';this.style.color='var(--danger)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">Clear</button>
     </div>
     <div class="alerts-body" id="alerts-body">
       <div class="empty-state" style="padding:24px 8px">No alerts yet.</div>
@@ -643,6 +706,7 @@ let allStats     = {};
 let allPool      = {};
 let allNodes     = {};
 let lastAlertLen = 0;
+let serverTimeOffset = 0;  // diff between server clock and browser clock (seconds)
 let refreshTimer = null;
 
 // ── Clock ──────────────────────────────────────────────────────────────────
@@ -674,7 +738,7 @@ async function api(url) {
 }
 
 // ── Render nodes ───────────────────────────────────────────────────────────
-function renderNodes(nodes) {
+function renderNodes(nodes, pool) {
   allNodes = {};
   nodes.forEach(n => allNodes[n.node_id] = n);
 
@@ -694,6 +758,8 @@ function renderNodes(nodes) {
     const ram    = n.ram_pct || 0;
     const cpuCls = cpu > 80 ? 'danger' : cpu > 60 ? 'warn' : '';
     const ramCls = ram > 88 ? 'danger' : ram > 72 ? 'warn' : '';
+    // Count streams from pool (source of truth) not heartbeat
+    const poolCount = pool ? Object.values(pool).filter(nid => nid === n.node_id).length : (n.stream_count||0);
     return `
     <div class="node-card ${n.status}">
       <div class="node-top">
@@ -710,7 +776,7 @@ function renderNodes(nodes) {
         <div class="meter-bar"><div class="meter-fill ${ramCls}" style="width:${Math.min(ram,100)}%"></div></div>
       </div>
       <div class="node-bottom">
-        <div>STREAMS <b>${n.stream_count||0}</b></div>
+        <div>STREAMS <b>${poolCount}</b></div>
         <div>AVG FPS <b>${(n.avg_fps||0).toFixed(1)}</b></div>
         <div>PLATFORM <b>${n.platform||'?'}</b></div>
       </div>
@@ -736,14 +802,24 @@ function renderPool(pool) {
     el.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--muted);padding:4px 0">No streams added yet.</div>';
   } else {
     el.innerHTML = urls.map(url => {
-      const nid   = pool[url];
-      const live  = !!nid;
-      const label = url.length > 32 ? '…' + url.slice(-29) : url;
+      const nid     = pool[url];
+      const live    = !!nid;
+      // Show stream name (last path segment) + short host prefix for context
+      const parts   = url.replace(/\\/g, '/').split('/');
+      const name    = parts[parts.length - 1] || parts[parts.length - 2] || url;
+      const host    = url.match(/\/\/([^/]+)/)?.[1] || '';
+      const label   = name ? `${name}` : url.slice(0, 28);
+      const subtitle = host ? host.slice(0, 20) : '';
+      const safeUrl = url.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       return `
       <div class="stream-item">
         <div class="sdot ${live?'live':''}"></div>
-        <div class="surl" title="${url}">${label}</div>
+        <div class="surl" title="${url}">
+          <span style="color:var(--accent)">${label}</span>
+          ${subtitle ? `<span style="color:var(--muted);font-size:8px;display:block;margin-top:1px">${subtitle}</span>` : ''}
+        </div>
         <div class="snid">${nid||'unassigned'}</div>
+        <button class="remove-btn" onclick="removeStream('${safeUrl}')" title="Remove stream">✕</button>
       </div>`;
     }).join('');
   }
@@ -766,7 +842,21 @@ function renderPool(pool) {
 function renderStatsTable(stats, pool) {
   allStats = stats;
   const tbody = document.getElementById('stats-tbody');
-  const entries = Object.entries(stats);
+
+  // Build pool URL map for filtering only (not for names)
+  const assignedKeys = new Set();
+  const nodeStreamsMap = {};
+  Object.entries(pool).forEach(([url, nodeId]) => {
+    if (!nodeId) return;
+    if (!nodeStreamsMap[nodeId]) nodeStreamsMap[nodeId] = [];
+    nodeStreamsMap[nodeId].push(url);
+  });
+  Object.entries(nodeStreamsMap).forEach(([nodeId, urls]) => {
+    urls.forEach((_, idx) => assignedKeys.add(`${nodeId}:${idx}`));
+  });
+
+  // Only show entries whose node:streamId is still in the pool
+  const entries = Object.entries(stats).filter(([key]) => assignedKeys.has(key));
 
   if (!entries.length) {
     tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No stream data yet. Start edge agent.</td></tr>';
@@ -782,31 +872,33 @@ function renderStatsTable(stats, pool) {
   const now = Date.now() / 1000;
 
   tbody.innerHTML = entries.map(([key, s]) => {
-    const parts    = key.split(':');
-    const nodeId   = parts[0];
-    const streamId = parts[1];
+    const [nodeId, streamId] = key.split(':');
+
+    // Use stream_name stored directly by server at ingest time — always correct
+    const streamName = s.stream_name || s.stream_url || `stream${streamId}`;
+    const fullUrl    = s.stream_url || '';
 
     const fps     = (s.fps     || 0).toFixed(1);
     const modelMs = (s.model_ms|| 0).toFixed(1);
     const e2eMs   = (s.e2e_ms  || 0).toFixed(1);
     const ts      = s.timestamp || 0;
-    const age     = ts ? Math.round(now - ts) : null;
-    const ageStr  = age === null ? '—' : age < 5 ? 'live' : `${age}s ago`;
-    const ageCls  = age === null ? '' : age < 5 ? 'green' : age < 15 ? 'warn' : 'danger';
+    // Use server-synced time for accurate age (eliminates browser/server clock skew)
+    const serverNow = (Date.now() / 1000) + serverTimeOffset;
+    const age     = ts ? Math.round(serverNow - ts) : null;
+    const adjAge  = age !== null ? Math.max(0, age) : null;
+    const ageStr  = adjAge === null ? '—' : adjAge < 5 ? 'live' : adjAge < 60 ? `${adjAge}s ago` : `${Math.round(adjAge/60)}m ago`;
+    const ageCls  = adjAge === null ? '' : adjAge < 5 ? 'green' : adjAge < 15 ? 'warn' : 'danger';
 
-    // Status based on FPS and age
-    const isLive  = age !== null && age < 8 && (s.fps||0) > 1;
-    const status  = isLive ? 'LIVE' : 'STALE';
+    // LIVE = fps > 0 AND frames arrived within last 8 seconds (server time)
+    const isLive  = (s.fps||0) > 1 && adjAge !== null && adjAge < 8;
     const stsCls  = isLive ? 'green' : 'danger';
-
-    // FPS color
     const fpsCls  = (s.fps||0) >= 20 ? 'green' : (s.fps||0) >= 10 ? 'warn' : 'danger';
 
     return `
     <tr class="clickable-row" onclick="showNode('${nodeId}')">
-      <td class="accent">stream${streamId}</td>
+      <td class="accent" title="${fullUrl}">${streamName}</td>
       <td>${nodeId}</td>
-      <td class="${stsCls}">${status}</td>
+      <td class="${stsCls}">${isLive?'LIVE':'OFFLINE'}</td>
       <td class="${fpsCls}">${fps}</td>
       <td>${modelMs}ms</td>
       <td>${e2eMs}ms</td>
@@ -950,6 +1042,39 @@ async function addStream() {
   if (r.ok) { document.getElementById('inp-url').value=''; refresh(); }
 }
 
+let _pendingRemoveUrl = null;
+
+function removeStream(url) {
+  _pendingRemoveUrl = url;
+  const parts = url.replace(/\\/g, '/').split('/');
+  const name  = parts[parts.length-1] || url;
+  document.getElementById('modal-url-display').textContent = name + '  (' + url + ')';
+  document.getElementById('confirm-modal').classList.add('show');
+}
+
+function closeModal() {
+  _pendingRemoveUrl = null;
+  document.getElementById('confirm-modal').classList.remove('show');
+}
+
+async function confirmRemove() {
+  const url = _pendingRemoveUrl;
+  closeModal();
+  if (!url) return;
+  await fetch('/streams/remove', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({url})
+  });
+  refresh();
+}
+
+// Close modal on overlay click
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('confirm-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+  });
+});
+
 async function assignStream() {
   const url    = document.getElementById('sel-stream').value;
   const nodeId = document.getElementById('sel-node').value;
@@ -966,6 +1091,17 @@ document.getElementById('inp-url').addEventListener('keydown', e => {
   if (e.key === 'Enter') addStream();
 });
 
+// ── Clear alerts ───────────────────────────────────────────────────────────
+async function clearAlerts() {
+  await fetch('/alerts/clear', { method: 'POST' });
+  lastAlertLen = 0;
+  document.getElementById('alerts-body').innerHTML =
+    '<div class="empty-state" style="padding:24px 8px">No alerts yet.</div>';
+  document.getElementById('sb-alerts').textContent = 0;
+  document.getElementById('h-alerts').textContent  = '0 alerts';
+  document.getElementById('h-alert-dot').className = 'dot muted';
+}
+
 // ── Main refresh ───────────────────────────────────────────────────────────
 async function refresh() {
   const [statsData, alertsData] = await Promise.all([
@@ -973,7 +1109,11 @@ async function refresh() {
   ]);
 
   if (statsData) {
-    renderNodes(statsData.nodes || []);
+    // Sync clocks: server_time lets us compute accurate frame age
+    if (statsData.server_time) {
+      serverTimeOffset = statsData.server_time - (Date.now() / 1000);
+    }
+    renderNodes(statsData.nodes || [], statsData.stream_pool || {});
     renderPool(statsData.stream_pool || {});
     renderStatsTable(statsData.stream_stats || {}, statsData.stream_pool || {});
   }
@@ -987,5 +1127,19 @@ async function refresh() {
 refresh();
 setInterval(refresh, 1500);
 </script>
+
+<!-- ══ CONFIRM MODAL ══ -->
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal-box">
+    <span class="modal-icon">🗑️</span>
+    <div class="modal-title">Remove Stream</div>
+    <div class="modal-msg">This stream will be removed from the pool and will stop being processed.</div>
+    <div class="modal-url" id="modal-url-display"></div>
+    <div class="modal-btns">
+      <button class="modal-btn-cancel" onclick="closeModal()">Cancel</button>
+      <button class="modal-btn-confirm" onclick="confirmRemove()">Remove</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
