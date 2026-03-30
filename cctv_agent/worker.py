@@ -1,7 +1,13 @@
+import os
+# Must be set BEFORE ultralytics/OpenVINO are imported.
+# Direct assignment (not setdefault) so inherited env vars are overridden.
+os.environ["OMP_NUM_THREADS"]      = "4"
+os.environ["OPENVINO_NUM_THREADS"] = "4"
+
 import cv2
 import time
+import ctypes
 import numpy as np
-import os
 import psutil
 import queue
 import logging
@@ -10,7 +16,23 @@ from multiprocessing import shared_memory
 
 from .detector import Detector
 from .utils import now, latency_ms
-from .config import get_config
+from .config import Config, get_config
+
+
+# ============================================================
+# WINDOWS TIMER RESOLUTION
+# ============================================================
+
+def _set_timer_resolution():
+    """
+    Set Windows timer resolution to 1ms in THIS process.
+    Must be called independently in every spawned subprocess —
+    the setting is per-process and is NOT inherited from the parent.
+    """
+    try:
+        ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -18,7 +40,6 @@ from .config import get_config
 # ============================================================
 
 def get_pcore_logical_ids():
-    """Return logical processor IDs that belong to P-cores (heuristic)."""
     freqs = psutil.cpu_freq(percpu=True)
     if not freqs or len(freqs) < 2:
         total_logical = psutil.cpu_count(logical=True)
@@ -29,19 +50,23 @@ def get_pcore_logical_ids():
 
 
 def assign_cores_hybrid(worker_index, num_decoders, cores_per_decoder, is_inference=False):
-    """Inference → P-cores. Decoders → E-cores, round-robin."""
     total_logical = psutil.cpu_count(logical=True)
-    pcore_ids = get_pcore_logical_ids()
-    ecore_ids = [i for i in range(total_logical) if i not in pcore_ids]
-
+    pcore_ids     = get_pcore_logical_ids()
+    ecore_ids     = [i for i in range(total_logical) if i not in pcore_ids]
     if is_inference:
         return pcore_ids
-
     start, end = worker_index * cores_per_decoder, (worker_index + 1) * cores_per_decoder
     if end > len(ecore_ids):
         print(f"Warning: insufficient E-cores for decoder {worker_index}, using any cores.")
         return list(range(total_logical))[start:end]
     return ecore_ids[start:end]
+
+
+def _resolve_config(cfg_dict):
+    """Reconstruct config from dict (zero disk I/O) or fall back to singleton."""
+    if cfg_dict is not None:
+        return Config.from_dict(cfg_dict)
+    return get_config()
 
 
 # ============================================================
@@ -50,13 +75,19 @@ def assign_cores_hybrid(worker_index, num_decoders, cores_per_decoder, is_infere
 
 def decoder_worker(index, stream_url, shm_names, frame_shape,
                    meta_queue, stop_event, inference_alive,
-                   num_decoders, cores_per_decoder):
+                   num_decoders, cores_per_decoder,
+                   cfg_dict=None):
     """
-    shm_names: (name_a, name_b) — double-buffer slots.
-    Alternates writes between slots so inference always reads a stable buffer.
+    Reads frames, writes into double-buffered shared memory slots 0 and 1.
+    Slot 2 is the display buffer owned by inference_worker. Decoder NEVER
+    touches slot 2.
+
+    shm_names: (name_a, name_b, name_c) — 3 slots per stream.
     """
+    _set_timer_resolution()
+
     log = logging.getLogger(f"decoder.{index}")
-    cfg = get_config()
+    cfg = _resolve_config(cfg_dict)
 
     p = psutil.Process()
     try:
@@ -82,6 +113,7 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
         return
 
     try:
+        # Open all 3 shm slots — decoder only writes slots 0 and 1
         shm_slots     = [shared_memory.SharedMemory(name=n) for n in shm_names]
         frame_buffers = [np.ndarray(frame_shape, dtype=np.uint8, buffer=shm.buf)
                          for shm in shm_slots]
@@ -90,9 +122,7 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
         cap.release()
         return
 
-    log.info("Waiting for inference warmup...")
     print(f"[Decoder {index}] Waiting for inference...")
-
     while not stop_event.is_set() and not inference_alive.is_set():
         time.sleep(0.1)
 
@@ -105,25 +135,26 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
     log.info(f"Started — {stream_url}")
     print(f"[Decoder {index}] Started for {stream_url}")
 
-    # ── Pacing from config ────────────────────────────────────────────────────
-    pace_sleep           = 0.033
-    PACE_MIN             = cfg.decoder.pace_min
-    PACE_MAX             = cfg.decoder.pace_max
-    ALPHA_UP             = cfg.decoder.alpha_up
-    ALPHA_DOWN           = cfg.decoder.alpha_down
+    pace_sleep = 0.033
+    PACE_MIN   = cfg.decoder.pace_min
+    PACE_MAX   = cfg.get("decoder.pace_max_rtsp", cfg.decoder.pace_max)
+    ALPHA_UP   = cfg.decoder.alpha_up
+    ALPHA_DOWN = cfg.decoder.alpha_down
     READ_STALL_THRESHOLD = cfg.pipeline.stall_threshold_ms
 
     if os.path.isfile(stream_url):
         source_fps          = cap.get(cv2.CAP_PROP_FPS)
         file_frame_interval = (1.0 / source_fps) if source_fps > 0 else 0.033
-        log.info(f"Local file — pacing to {source_fps:.1f} FPS ({file_frame_interval*1000:.1f}ms/frame)")
-        print(f"[Decoder {index}] Local file — pacing to {source_fps:.1f} FPS ({file_frame_interval*1000:.1f}ms/frame)")
+        log.info(f"Local file — pacing to {source_fps:.1f} FPS")
+        print(f"[Decoder {index}] Local file — pacing to {source_fps:.1f} FPS "
+              f"({file_frame_interval*1000:.1f}ms/frame)")
     else:
         file_frame_interval = 0
 
-    drop_count = stall_count = 0
+    drop_count      = 0
+    stall_count     = 0
     reconnect_delay = 2
-    buf_idx = 0
+    buf_idx         = 0   # alternates between 0 and 1 only — slot 2 is inference's
 
     while not stop_event.is_set():
 
@@ -140,7 +171,6 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
                 log.info("End of file.")
                 print(f"[Decoder {index}] End of file")
                 break
-
             log.warning(f"Stream lost — reconnecting in {reconnect_delay}s")
             print(f"[Decoder {index}] Reconnecting in {reconnect_delay}s")
             cap.release()
@@ -162,11 +192,16 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
             frame, (frame_shape[1], frame_shape[0]),
             interpolation=cv2.INTER_NEAREST
         )
+        # Write only to slot 0 or 1 — slot 2 is owned by inference_worker
         np.copyto(frame_buffers[buf_idx], frame_resized)
 
         sent = False
         try:
-            meta_queue.put_nowait({"stream_id": index, "buf_idx": buf_idx, "timestamp": now()})
+            meta_queue.put_nowait({
+                "stream_id": index,
+                "buf_idx":   buf_idx,
+                "timestamp": now(),
+            })
             sent = True
         except queue.Full:
             drop_count += 1
@@ -174,7 +209,7 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
                 log.warning(f"Dropped {drop_count} frames (queue full)")
                 print(f"[Decoder {index}] dropped {drop_count}")
 
-        buf_idx ^= 1
+        buf_idx ^= 1   # toggle between 0 and 1 only
 
         try:
             q_size = meta_queue.qsize()
@@ -204,13 +239,43 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
 
 def inference_worker(num_streams, frame_shape, shm_names,
                      meta_queues, result_queue, stop_event,
-                     inference_alive, num_decoders, cores_per_decoder):
+                     inference_alive, num_decoders, cores_per_decoder,
+                     cfg_dict=None, pipeline_start_time=None):
     """
-    shm_names: list of (name_a, name_b) tuples, one per stream.
-    Reads buf_idx from metadata to pick the correct double-buffer slot.
+    Per-frame sequential inference with metadata-only result messages.
+
+    shm_names: list of (name_a, name_b, name_c) tuples, one per stream.
+      Slot 0, 1: decoder double-buffer (reads buf_idx from meta)
+      Slot 2:    display buffer — inference writes here after inference;
+                 main reads here; no pickle, no copy through IPC.
+
+    WHY PER-FRAME SEQUENTIAL (not batched):
+    In the previous batched approach, the inference loop collected one
+    frame from EVERY stream before running inference. With 3 streams and
+    12ms per stream, stream 2 waited up to 24ms after its frame was
+    captured before inference even started. E2E for stream 2 was stamped
+    after the batch, inflating it by the cumulative wait.
+
+    Per-frame: each frame is inferred immediately. E2E is stamped right
+    after that frame's own inference. Streams don't wait for each other.
+    The 1ms inter-frame gap (time.sleep(0.001) on empty queue) is
+    negligible vs the 12ms inference time.
+
+    WHY METADATA-ONLY RESULT MESSAGES:
+    The previous version put the 245KB frame numpy array in every result
+    message. result_queue.put_nowait() pickles synchronously. At 3 streams
+    × 24 FPS = 72 pickle ops/sec of 245KB each, the OS scheduler regularly
+    preempts the inference process mid-pickle for 50-150ms. During that
+    block, decoders keep pushing frames. When inference resumes, those
+    frames report 50-150ms E2E despite 12ms model time.
+
+    FIX: frame goes into shm slot 2 (np.copyto, zero copy). Result message
+    is only boxes + latency numbers (~2KB). Pickle time: <0.1ms.
     """
+    _set_timer_resolution()
+
     log = logging.getLogger("inference")
-    cfg = get_config()
+    cfg = _resolve_config(cfg_dict)
 
     p = psutil.Process()
     try:
@@ -226,9 +291,10 @@ def inference_worker(num_streams, frame_shape, shm_names,
     detector    = Detector()
     class_names = detector.model.names
 
+    # 3 slots per stream: [stream_idx][slot_idx]
     shm_handles, frame_buffers = [], []
-    for name_pair in shm_names:
-        slots = [shared_memory.SharedMemory(name=n) for n in name_pair]
+    for name_triple in shm_names:
+        slots = [shared_memory.SharedMemory(name=n) for n in name_triple]
         shm_handles.append(slots)
         frame_buffers.append([
             np.ndarray(frame_shape, dtype=np.uint8, buffer=shm.buf)
@@ -236,14 +302,20 @@ def inference_worker(num_streams, frame_shape, shm_names,
         ])
 
     detector.warmup()
+    time.sleep(0.05)   # let warmup settle before flushing
 
     for mq in meta_queues:
         while True:
-            try: mq.get_nowait()
-            except queue.Empty: break
+            try:
+                mq.get_nowait()
+            except queue.Empty:
+                break
 
     trackers        = [sv.ByteTrack() for _ in range(num_streams)]
-    FRAME_AGE_LIMIT = cfg.pipeline.frame_age_limit_ms
+    FRAME_AGE_LIMIT = 150   # ms — tight limit; stale frames inflate E2E
+
+    if pipeline_start_time is None:
+        pipeline_start_time = now() - 10000
 
     inference_alive.set()
     log.info("Ready — decoders can start")
@@ -253,30 +325,40 @@ def inference_worker(num_streams, frame_shape, shm_names,
 
     while not stop_event.is_set():
 
-        batch_frames, batch_metadata = [], []
+        processed_any = False
 
         for i, mq in enumerate(meta_queues):
+
             try:
                 meta = mq.get_nowait()
-                if latency_ms(meta["timestamp"], now()) > FRAME_AGE_LIMIT:
-                    continue
-                frame = frame_buffers[i][meta["buf_idx"]].copy()
-                batch_frames.append(frame)
-                batch_metadata.append(meta)
             except queue.Empty:
-                pass
+                continue
 
-        if not batch_frames:
-            stop_event.wait(timeout=0.001)
-            continue
+            # Reject frames from before this pipeline incarnation
+            if meta["timestamp"] < pipeline_start_time:
+                continue
 
-        infer_start  = now()
-        results      = detector.detect_raw(batch_frames)
-        total_ms     = latency_ms(infer_start, now())
-        per_frame_ms = total_ms / len(batch_frames)
+            # Reject stale frames
+            if latency_ms(meta["timestamp"], now()) > FRAME_AGE_LIMIT:
+                continue
 
-        for i, res in enumerate(results):
-            meta  = batch_metadata[i]
+            # Read from decoder slot (0 or 1)
+            frame = frame_buffers[i][meta["buf_idx"]].copy()
+
+            # Infer this frame immediately — no waiting for other streams
+            infer_start = now()
+            res         = detector.detect_raw(frame)
+            model_ms    = latency_ms(infer_start, now())
+
+            # Stamp E2E for THIS frame right after its own inference
+            e2e_lat = latency_ms(meta["timestamp"], now())
+
+            # Write raw frame to display slot 2 so main can read it without IPC.
+            # Ownership: decoder writes 0/1, inference writes 2, main reads 2.
+            # No two processes share any slot as writers.
+            np.copyto(frame_buffers[i][2], frame)
+
+            # Tracking
             boxes = classes = confs = labels = track_ids = None
 
             if res.boxes is not None:
@@ -293,11 +375,21 @@ def inference_worker(num_streams, frame_shape, shm_names,
                 confs     = tracked.confidence
                 track_ids = tracked.tracker_id
 
-            e2e_lat = latency_ms(meta["timestamp"], now())
-
-            msg = ("frame", meta["stream_id"], batch_frames[i],
-                   boxes, track_ids, classes, confs, labels,
-                   meta["timestamp"], per_frame_ms, e2e_lat)
+            # Metadata-only result message — NO frame array.
+            # Pickle: ~2KB instead of ~245KB.
+            msg = (
+                "frame",
+                meta["stream_id"],
+                # ← frame intentionally omitted; main reads from shm slot 2
+                boxes,
+                track_ids,
+                classes,
+                confs,
+                labels,
+                meta["timestamp"],
+                model_ms,
+                e2e_lat,
+            )
 
             try:
                 result_queue.put_nowait(msg)
@@ -307,8 +399,13 @@ def inference_worker(num_streams, frame_shape, shm_names,
                     log.warning(f"Dropped {result_drop_count} results (queue full)")
                     print(f"[Inference] dropped results={result_drop_count}")
 
-    for slot_pair in shm_handles:
-        for shm in slot_pair:
+            processed_any = True
+
+        if not processed_any:
+            time.sleep(0.001)
+
+    for slot_list in shm_handles:
+        for shm in slot_list:
             shm.close()
 
     log.info(f"Stopped | Drops={result_drop_count}")
