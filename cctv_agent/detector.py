@@ -1,12 +1,13 @@
 import os
+# Must be set BEFORE any OpenVINO/ultralytics imports.
+# Direct assignment, not setdefault — setdefault won't override inherited
+# env vars. Must be at module top so it runs before import-time initialization.
+os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["OPENVINO_NUM_THREADS"] = "4"
+
 import shutil
 import logging
 import numpy as np
-
-# Limit thread pools before importing OpenVINO/ultralytics
-os.environ.setdefault("OMP_NUM_THREADS", "4")
-os.environ.setdefault("OPENVINO_NUM_THREADS", "4")
-
 from ultralytics import YOLO
 from .config import get_config
 
@@ -51,41 +52,35 @@ class Detector:
         self.model = YOLO(ov_path, task="detect")
 
     def warmup(self, num_iters: int = None):
-        """Warm up OpenVINO kernels. Non-fatal on failure."""
         log = logging.getLogger("detector")
         if num_iters is None:
             num_iters = self._warmup_iters
-
         dummy = np.zeros((self._imgsz, self._imgsz, 3), dtype=np.uint8)
         log.info(f"Warming up ({num_iters} passes)...")
         print(f"[Detector] Warming up ({num_iters} passes)...")
-
         for i in range(num_iters):
             try:
                 _ = self.model.predict(dummy, imgsz=self._imgsz, verbose=False, device="cpu")
             except Exception as e:
                 log.warning(f"Warmup pass {i+1} failed (non-fatal): {e}")
                 print(f"[Detector] Warmup pass {i+1} failed (non-fatal): {e}")
-
         log.info("Warm-up complete.")
         print("[Detector] Warm-up complete.")
 
     def detect_raw(self, frames):
         """
-        Run inference on a single frame or list of frames.
+        Single frame or list of frames.
         Per-frame loop — OpenVINO batch=1 model does not support list input.
         """
         single = not isinstance(frames, list)
         if single:
             frames = [frames]
-
         results = []
         for frame in frames:
             res = self.model.predict(
                 frame, imgsz=self._imgsz,
                 conf=self._confidence,
-                verbose=False, device="cpu"
+                verbose=False, device="cpu",
             )
             results.append(res[0])
-
         return results[0] if single else results
