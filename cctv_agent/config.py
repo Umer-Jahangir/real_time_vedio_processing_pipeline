@@ -1,12 +1,5 @@
 """
 config.py — Configuration loader for both central server and edge nodes.
-
-Usage:
-    from cctv_agent.config import cfg, Config, setup_logging
-
-    cfg.node.id
-    cfg.pipeline.frame_height
-    cfg.model.confidence
 """
 
 import os
@@ -22,10 +15,6 @@ except ImportError:
     sys.exit(1)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Dot-access namespace
-# ─────────────────────────────────────────────────────────────────────────────
-
 class _Namespace:
     def __init__(self, data: dict):
         for k, v in data.items():
@@ -34,10 +23,6 @@ class _Namespace:
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Required fields
-# ─────────────────────────────────────────────────────────────────────────────
 
 _REQUIRED_EDGE = [
     "node.id", "node.role",
@@ -72,10 +57,6 @@ def _validate(data: dict, keys: list, path: str):
         sys.exit(1)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Config class
-# ─────────────────────────────────────────────────────────────────────────────
-
 class Config:
     _instance = None
 
@@ -102,6 +83,18 @@ class Config:
 
     def is_edge(self) -> bool:
         return self.role() == "edge"
+
+    def to_dict(self) -> dict:
+        """Return a deep copy safe for pickling across process boundaries."""
+        import copy
+        return copy.deepcopy(self._data)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Config":
+        """Reconstruct from a dict — zero disk I/O. Used in subprocesses."""
+        inst = cls(data, path="<passed-from-parent>")
+        cls._instance = inst
+        return inst
 
     @classmethod
     def load(cls, path: str = None) -> "Config":
@@ -156,8 +149,7 @@ def get_config(path: str = None) -> Config:
 
 
 def setup_logging(cfg: Config):
-    """Configure Python logging from config values."""
-    level = getattr(logging, cfg.get("logging.level", "INFO").upper(), logging.INFO)
+    level    = getattr(logging, cfg.get("logging.level", "INFO").upper(), logging.INFO)
     handlers = [logging.StreamHandler(sys.stdout)]
     lf = cfg.get("logging.file")
     if lf:
@@ -175,11 +167,18 @@ def setup_logging(cfg: Config):
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-# Auto-load on import if config.yaml is findable
+# Auto-load on import — ONLY in the main process, never in spawned subprocesses.
+# Subprocesses receive cfg_dict from the parent and call Config.from_dict()
+# so they must NOT trigger a disk read here.
+# Detection: multiprocessing.current_process().name is always 'MainProcess'
+# in the parent; spawned workers get names like 'inference', 'decoder-0', etc.
 cfg: Config = None
 
 def _auto_load():
     global cfg
+    import multiprocessing as _mp
+    if _mp.current_process().name != 'MainProcess':
+        return   # subprocess — skip disk read
     candidates = [
         Path("config.yaml"),
         Path("../config.yaml"),
