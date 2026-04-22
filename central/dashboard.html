@@ -399,6 +399,23 @@
   }
   #page-node.active { display:flex; }
 
+  #page-stream {
+    display:none; flex-direction:column;
+    background:var(--bg);
+  }
+  #page-stream.active { display:flex; }
+
+  .video-single {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 400px;
+  }
+  .video-single img {
+    max-width: 100%;
+    height: auto;
+  }
+
   .node-view-header {
     display:flex; align-items:center; gap:16px;
     padding:12px 20px; background:var(--surface);
@@ -429,9 +446,22 @@
 
   .nv-stat b { font-size:14px; color:var(--accent); font-weight:400; }
 
-  .node-view-body { flex:1; overflow-y:auto; padding:16px; }
-  .node-view-body::-webkit-scrollbar { width:4px; }
-  .node-view-body::-webkit-scrollbar-thumb { background:var(--border); }
+  .node-view-body { 
+    flex:1; display:flex; overflow:hidden;
+  }
+  
+  .node-view-main { 
+    flex:1; overflow-y:auto; padding:16px; 
+  }
+  .node-view-main::-webkit-scrollbar { width:4px; }
+  .node-view-main::-webkit-scrollbar-thumb { background:var(--border); }
+  
+  .node-view-sidebar {
+    width:300px; background:var(--surface); border-left:1px solid var(--border);
+    overflow-y:auto; padding:16px;
+  }
+  .node-view-sidebar::-webkit-scrollbar { width:4px; }
+  .node-view-sidebar::-webkit-scrollbar-thumb { background:var(--border); }
 
   /* ── VIDEO GRID ── */
   .video-grid {
@@ -497,10 +527,55 @@
 
   /* Corner accents on tiles */
   .corner { position:absolute; width:10px; height:10px; z-index:4; }
-  .corner.tl { top:0;    left:0;  border-top:2px solid var(--accent); border-left:2px solid var(--accent); }
-  .corner.tr { top:0;    right:0; border-top:2px solid var(--accent); border-right:2px solid var(--accent); }
-  .corner.bl { bottom:0; left:0;  border-bottom:2px solid var(--accent); border-left:2px solid var(--accent); }
-  .corner.br { bottom:0; right:0; border-bottom:2px solid var(--accent); border-right:2px solid var(--accent); }
+  .activity-item {
+    border:1px solid var(--border); border-radius:6px;
+    padding:10px; margin-bottom:8px; background:var(--panel);
+  }
+  
+  .activity-header {
+    display:flex; justify-content:space-between; align-items:center;
+    margin-bottom:6px;
+  }
+  
+  .activity-person {
+    font-family:var(--mono); font-size:11px; font-weight:600;
+    color:var(--accent);
+  }
+  
+  .activity-action {
+    font-family:var(--mono); font-size:10px; padding:2px 6px;
+    border-radius:3px; font-weight:600;
+  }
+  
+  .activity-action.standing { background:rgba(0,255,136,.15); color:var(--green); }
+  .activity-action.walking  { background:rgba(0,212,255,.15); color:var(--accent); }
+  .activity-action.running  { background:rgba(255,165,0,.15); color:#ffaa00; }
+  .activity-action.fighting { background:rgba(255,51,85,.15); color:var(--danger); }
+  
+  .activity-details {
+    font-family:var(--mono); font-size:9px; color:var(--muted);
+    line-height:1.4;
+  }
+
+  .detection-item {
+    border:1px solid var(--border); border-radius:6px;
+    padding:8px; margin-bottom:6px; background:var(--panel);
+    font-family:var(--mono); font-size:10px;
+  }
+
+  .det-label { color: var(--green); }
+  .det-id { color: var(--accent); margin-left: 8px; }
+  .det-action { color: #ffaa00; margin-left: 8px; }
+  .det-conf { color: var(--danger); margin-left: 8px; }
+
+  .alert-item {
+    border:1px solid var(--border); border-radius:6px;
+    padding:8px; margin-bottom:6px; background:var(--panel);
+    font-family:var(--mono); font-size:9px;
+  }
+
+  .alert-item.critical { border-color: var(--danger); }
+  .alert-item.warning { border-color: var(--warn); }
 
   /* ── DIVIDERS ── */
   .divider { height:1px; background:var(--border); margin:12px 0; }
@@ -695,16 +770,59 @@
     </div>
   </div>
   <div class="node-view-body">
-    <div class="video-grid" id="video-grid"></div>
+    <div class="node-view-main">
+      <div class="video-grid" id="video-grid"></div>
+    </div>
+    <div class="node-view-sidebar">
+      <div class="sec-title">Activity Monitor</div>
+      <div id="activity-list" style="margin-top:12px;">
+        <div style="font-family:var(--mono);font-size:9px;color:var(--muted);padding:8px 0;text-align:center">
+          Waiting for activity data...
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ PAGE: STREAM DETAIL VIEW ══ -->
+<div class="page" id="page-stream">
+  <div class="node-view-header">
+    <button class="back-btn" onclick="showMain()">← Back</button>
+    <div>
+      <div class="nv-title" id="stream-title">STREAM</div>
+      <div class="nv-meta" id="stream-meta">—</div>
+    </div>
+    <div class="nv-stats">
+      <div class="nv-stat"><span>FPS</span><b id="stream-fps">—</b></div>
+      <div class="nv-stat"><span>MODEL</span><b id="stream-model">—</b></div>
+      <div class="nv-stat"><span>E2E</span><b id="stream-e2e">—</b></div>
+      <div class="nv-stat"><span>STATUS</span><b id="stream-status">—</b></div>
+    </div>
+  </div>
+  <div class="node-view-body">
+    <div class="node-view-main">
+      <div class="video-single" id="video-single"></div>
+    </div>
+    <div class="node-view-sidebar">
+      <div class="sec-title">Stream Details</div>
+      <div id="stream-details" style="margin-top:12px;">
+        <div style="font-family:var(--mono);font-size:9px;color:var(--muted);padding:8px 0;text-align:center">
+          Loading stream details...
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
 let currentNode  = null;
+let currentStream = null;
 let allStats     = {};
 let allPool      = {};
 let allNodes     = {};
+let allDetections = {};
+let allAlerts    = [];
 let lastAlertLen = 0;
 let serverTimeOffset = 0;  // diff between server clock and browser clock (seconds)
 let refreshTimer = null;
@@ -723,9 +841,18 @@ function showNode(nodeId) {
   renderNodeView();
 }
 
+function showStreamDetail(nodeId, streamId) {
+  currentStream = {nodeId, streamId};
+  document.getElementById('page-main').classList.remove('active');
+  document.getElementById('page-stream').classList.add('active');
+  renderStreamDetail();
+}
+
 function showMain() {
   currentNode = null;
+  currentStream = null;
   document.getElementById('page-node').classList.remove('active');
+  document.getElementById('page-stream').classList.remove('active');
   document.getElementById('page-main').classList.add('active');
 }
 
@@ -895,7 +1022,7 @@ function renderStatsTable(stats, pool) {
     const fpsCls  = (s.fps||0) >= 20 ? 'green' : (s.fps||0) >= 10 ? 'warn' : 'danger';
 
     return `
-    <tr class="clickable-row" onclick="showNode('${nodeId}')">
+    <tr class="clickable-row" onclick="showStreamDetail('${nodeId}', '${streamId}')">
       <td class="accent" title="${fullUrl}">${streamName}</td>
       <td>${nodeId}</td>
       <td class="${stsCls}">${isLive?'LIVE':'OFFLINE'}</td>
@@ -903,7 +1030,7 @@ function renderStatsTable(stats, pool) {
       <td>${modelMs}ms</td>
       <td>${e2eMs}ms</td>
       <td class="${ageCls}">${ageStr}</td>
-      <td><button class="view-btn" onclick="event.stopPropagation();showNode('${nodeId}')">▶ View</button></td>
+      <td><button class="view-btn" onclick="event.stopPropagation();showStreamDetail('${nodeId}', '${streamId}')">▶ View</button></td>
     </tr>`;
   }).join('');
 }
@@ -1029,6 +1156,107 @@ function renderNodeView() {
       </div>`;
     grid.appendChild(tile);
   });
+  
+  // Render activity sidebar
+  renderActivitySidebar(currentNode);
+}
+
+// ── Activity sidebar ───────────────────────────────────────────────────────
+function renderActivitySidebar(nodeId) {
+  const sidebar = document.getElementById('activity-list');
+  
+  // Find all detections for this node's streams
+  const nodeActivities = [];
+  Object.entries(allDetections).forEach(([key, detections]) => {
+    if (key.startsWith(`${nodeId}:`)) {
+      const streamId = key.split(':')[1];
+      const streamName = Object.keys(allPool).find(url => allPool[url] === nodeId) || `stream${streamId}`;
+      const streamLabel = streamName.split('/').pop() || streamName;
+      
+      detections.forEach(det => {
+        if (det.label === 'person') {
+          nodeActivities.push({
+            stream: streamLabel,
+            person_id: det.track_id,
+            action: det.action || 'unknown',
+            confidence: det.conf
+          });
+        }
+      });
+    }
+  });
+  
+  if (!nodeActivities.length) {
+    sidebar.innerHTML = '<div style="font-family:var(--mono);font-size:9px;color:var(--muted);padding:8px 0;text-align:center">No person detections yet.<br>Activity will appear here.</div>';
+    return;
+  }
+  
+  // Sort by stream, then by person ID
+  nodeActivities.sort((a,b) => {
+    if (a.stream !== b.stream) return a.stream.localeCompare(b.stream);
+    return a.person_id - b.person_id;
+  });
+  
+  sidebar.innerHTML = nodeActivities.map(activity => `
+    <div class="activity-item">
+      <div class="activity-header">
+        <span class="activity-person">Person ${activity.person_id}</span>
+        <span class="activity-action ${activity.action}">${activity.action.toUpperCase()}</span>
+      </div>
+      <div class="activity-details">
+        Stream: ${activity.stream}<br>
+        Confidence: ${(activity.confidence * 100).toFixed(1)}%
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── Render stream detail ───────────────────────────────────────────────────
+function renderStreamDetail() {
+  if (!currentStream) return;
+  const key = `${currentStream.nodeId}:${currentStream.streamId}`;
+  const s = allStats[key];
+  if (!s) return;
+  const streamName = s.stream_name || s.stream_url || `stream${currentStream.streamId}`;
+  document.getElementById('stream-title').textContent = streamName;
+  document.getElementById('stream-meta').textContent = `${currentStream.nodeId} · ${s.stream_url || ''}`;
+  document.getElementById('stream-fps').textContent = (s.fps || 0).toFixed(1);
+  document.getElementById('stream-model').textContent = (s.model_ms || 0).toFixed(1) + 'ms';
+  document.getElementById('stream-e2e').textContent = (s.e2e_ms || 0).toFixed(1) + 'ms';
+  const serverNow = (Date.now() / 1000) + serverTimeOffset;
+  const age = s.timestamp ? Math.round(serverNow - s.timestamp) : null;
+  const isLive = (s.fps||0) > 1 && age !== null && age < 8;
+  document.getElementById('stream-status').textContent = isLive ? 'LIVE' : 'OFFLINE';
+  // video
+  const videoEl = document.getElementById('video-single');
+  videoEl.innerHTML = `<img src="/streams/${currentStream.nodeId}/${currentStream.streamId}/mjpeg" style="width:100%;height:auto;">`;
+  // details
+  const detailsEl = document.getElementById('stream-details');
+  const detections = allDetections[key] || [];
+  let html = '<div class="sec-title">Recent Detections</div>';
+  if (detections.length) {
+    html += detections.map(d => `
+      <div class="detection-item">
+        <span class="det-label">${d.label}</span>
+        <span class="det-id">ID ${d.track_id}</span>
+        <span class="det-action">${d.action}</span>
+        <span class="det-conf">${(d.conf * 100).toFixed(0)}%</span>
+      </div>
+    `).join('');
+  } else {
+    html += '<div style="font-family:var(--mono);font-size:9px;color:var(--muted);padding:8px 0;text-align:center">No recent detections</div>';
+  }
+  // alerts for this stream
+  const streamAlerts = allAlerts.filter(a => a.node_id === currentStream.nodeId && a.message.includes(streamName));
+  if (streamAlerts.length) {
+    html += '<div class="sec-title">Alerts</div>';
+    html += streamAlerts.map(a => `
+      <div class="alert-item ${a.level}">
+        ${alertIcon(a)} ${a.title}: ${a.message}
+      </div>
+    `).join('');
+  }
+  detailsEl.innerHTML = html;
 }
 
 // ── Stream management ──────────────────────────────────────────────────────
@@ -1116,12 +1344,17 @@ async function refresh() {
     renderNodes(statsData.nodes || [], statsData.stream_pool || {});
     renderPool(statsData.stream_pool || {});
     renderStatsTable(statsData.stream_stats || {}, statsData.stream_pool || {});
+    allDetections = statsData.latest_detections || {};
   }
 
-  if (alertsData) renderAlerts(alertsData.alerts || []);
+  if (alertsData) {
+    allAlerts = alertsData.alerts || [];
+    renderAlerts(allAlerts);
+  }
 
   // If on node view page, keep it updated
   if (currentNode) renderNodeView();
+  if (currentStream) renderStreamDetail();
 }
 
 refresh();
