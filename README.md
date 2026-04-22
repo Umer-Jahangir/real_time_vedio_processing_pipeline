@@ -1,40 +1,70 @@
 # Real-Time Distributed CCTV Monitoring System
 
-A high-performance, scalable CCTV monitoring system built for real-time multi-stream object detection using YOLOv8 + OpenVINO on CPU. Designed to run on edge nodes that auto-register with a central server and appear on a live dashboard — no manual configuration required for end users.
-
----
+A high-performance, scalable CCTV monitoring system designed for real-time multi-stream object detection using YOLOv8 and OpenVINO on CPU. The system enables edge nodes to auto-register with a central server, facilitating seamless deployment and management without manual configuration.
 
 ## Table of Contents
 
 - [Project Overview](#project-overview)
+- [What It Does](#what-it-does)
+- [How It Works](#how-it-works)
 - [Current Implementation](#current-implementation)
 - [Benchmark Results](#benchmark-results)
 - [Architecture](#architecture)
 - [Folder Structure](#folder-structure)
-- [How to Run](#how-to-run)
+- [Installation](#installation)
+- [Usage](#usage)
 - [Node Registration Flow](#node-registration-flow)
 - [Dashboard Interface](#dashboard-interface)
-- [Roadmap — What's Next](#roadmap--whats-next)
+- [Roadmap](#roadmap)
 - [Advantages](#advantages)
+- [Requirements](#requirements)
+- [License](#license)
+- [Requirements](#requirements)
+- [License](#license)
 
 ---
 
 ## Project Overview
 
-This system consists of two major components:
+This project implements a distributed CCTV monitoring system comprising two primary components: a central server with a web-based dashboard and lightweight edge agents deployed on CCTV nodes. The system leverages advanced computer vision models to perform real-time object detection across multiple video streams, ensuring efficient resource utilization and scalability.
 
-### 1. Central Server + Dashboard
-- Runs on a single machine (laptop or dedicated server).
-- Hosts the web-based monitoring dashboard.
-- Assigns streams, settings, and models to edge nodes.
-- Tracks node health, CPU usage, and online/offline status.
+## What It Does
 
-### 2. Edge Agent (`cctv_agent`)
-- Lightweight Python package installed on CCTV nodes.
-- Auto-connects to the central server on startup.
-- Downloads configuration and model files from the server.
-- Starts video decoding, YOLOv8 inference, and reporting pipelines.
-- No manual configuration required on the node side.
+The Real-Time Distributed CCTV Monitoring System provides:
+
+- **Real-Time Object Detection**: Processes multiple video streams simultaneously using YOLOv8 for accurate object detection.
+- **Distributed Architecture**: Centralizes control while distributing computation to edge nodes for optimal performance.
+- **Automated Node Management**: Edge agents auto-register with the central server, eliminating manual setup.
+- **Live Monitoring Dashboard**: Offers a web interface for overseeing node status, stream assignments, and performance metrics.
+- **Performance Tracking**: Monitors and reports CPU usage, RAM consumption, FPS, and latency in real-time.
+- **Scalable Deployment**: Supports horizontal scaling by adding more edge nodes to handle additional streams.
+
+## How It Works
+
+The system operates through a client-server architecture:
+
+1. **Central Server**: Manages node registration, stream assignments, model distribution, and hosts the monitoring dashboard.
+2. **Edge Agents**: Lightweight Python applications that run on CCTV nodes, handling video decoding, inference, and reporting.
+3. **Inference Pipeline**: Utilizes OpenVINO-optimized YOLOv8 models for CPU-based object detection, ensuring low latency and high throughput.
+4. **Communication**: Employs REST APIs and WebSockets for real-time data exchange between nodes and the server.
+5. **Resource Optimization**: Implements CPU affinity pinning and multi-threading to maximize performance on commodity hardware.
+
+---
+
+### System Components
+
+#### Central Server + Dashboard
+- Operates on a single machine (laptop or dedicated server).
+- Provides a web-based monitoring dashboard.
+- Manages stream assignments, configurations, and model distribution to edge nodes.
+- Monitors node health, CPU utilization, and online/offline status.
+
+#### Edge Agent (`cctv_agent`)
+- A lightweight Python package deployed on CCTV nodes.
+- Automatically connects to the central server upon startup.
+- Downloads necessary configurations and model files from the server.
+- Initiates video decoding, YOLOv8 inference, and reporting processes.
+- Requires no manual configuration on the node side.
 
 ---
 
@@ -126,37 +156,85 @@ Tests run on a **10-core CPU** with **3 concurrent streams**, using **YOLOv8n Op
 your_project/
 │
 ├── central/                        # Central server + dashboard
+│   ├── __init__.py
 │   ├── server.py
 │   ├── dashboard.html
 │   ├── config.yaml
-│   └── requirements.txt
+│   ├── requirements.txt
+│   ├── setup.py
+│   └── logs/
 │
-├── agent/                          # Python package for edge nodes
-│   ├── cctv_agent/
-│   │   ├── __init__.py
-│   │   ├── main.py                 # Entry point: python -m cctv_agent
-│   │   ├── worker.py               # Multi-stream pipeline manager
-│   │   ├── detector.py             # YOLOv8 OpenVINO inference
-│   │   ├── monitor.py              # CPU/RAM monitoring
-│   │   ├── reporter.py             # Reports stats back to server
-│   │   ├── controller.py           # Handles server config and registration
-│   │   ├── config.py               # Default configuration constants
-│   │   └── utils.py                # Shared utilities
-│   ├── setup.py                    # Makes it pip installable
-│   └── requirements.txt
+├── cctv_agent/                     # Python package for edge nodes
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── action_classifier.py
+│   ├── config.py
+│   ├── detector.py
+│   ├── export_model.py
+│   ├── main.py
+│   ├── monitor.py
+│   ├── reporter.py
+│   ├── requirements.txt
+│   ├── utils.py
+│   └── worker.py
 │
 ├── src/                            # Current standalone implementation
 │   ├── main.py                     # CLI entry point
 │   ├── models/
+│   │   ├── pose_landmarker_lite.task
+│   │   ├── yolov8n.pt
 │   │   └── yolov8n_openvino_model/ # Pre-converted OpenVINO model
+│   │       ├── metadata.yaml
+│   │       └── yolov8n.xml
 │   └── videos/                     # Test video files
 │
-└── README.md
+├── configs/
+│   ├── central_config.yaml
+│   └── edge_config.yaml
+│
+├── logs/
+├── config.yaml
+├── LICENSE
+├── README.md
+├── requirements.txt
+└── setup.py
 ```
 
 ---
 
-## How to Run
+## Installation
+
+### Prerequisites
+- Python >= 3.9
+- OpenVINO Runtime (for edge agent)
+
+### Standalone Version (Development)
+For testing the edge agent locally:
+```bash
+pip install -r cctv_agent/requirements.txt
+```
+
+### Central Server (Development)
+```bash
+cd central
+pip install -r requirements.txt
+# Or for development: pip install -e .
+```
+
+### Edge Agent (Development)
+```bash
+pip install -r cctv_agent/requirements.txt
+# Or for development: pip install -e .
+```
+
+### Production Installation
+For production deployment, install the packaged versions:
+- **Edge Agent**: `pip install https://github.com/<your_username>/<repo>/releases/download/v1.0.0/cctv_agent-1.0.0.tar.gz`
+- **Central Server**: `pip install https://github.com/<your_username>/<repo>/releases/download/v1.0.0/cctv_central-1.0.0.tar.gz`
+
+---
+
+## Usage
 
 ### Current Standalone Version
 
@@ -172,41 +250,22 @@ python main.py rtsp://192.168.1.10:8554/cam1 rtsp://192.168.1.10:8554/cam2
 # Press 'q' to quit — performance report prints on exit
 ```
 
----
+### Central Server
 
-### Central Server (Planned)
-
-1. Install dependencies:
-
-```bash
-pip install -r central/requirements.txt
-```
-
-2. Start the server:
-
+1. Start the server:
 ```bash
 python central/server.py
 ```
 
-3. Open `dashboard.html` in your browser.
+2. Open `dashboard.html` in your browser.
 
----
+### Edge Node
 
-### Edge Node (Planned)
-
-1. Install the agent:
-
-```bash
-pip install https://github.com/<your_username>/<repo>/releases/download/v1.0.0/cctv_agent-1.0.0.tar.gz
-```
-
-2. Run the agent (single command, nothing else needed):
-
+Run the agent with a single command:
 ```bash
 python -m cctv_agent --server 192.168.1.100
 ```
-
-The node auto-registers, downloads its config and model, and streams appear on the dashboard automatically.
+The node auto-registers, downloads its configuration and model, and streams appear on the dashboard automatically.
 
 ---
 
@@ -248,7 +307,7 @@ Pipelines start → Stats reported back to server every N seconds
 
 ---
 
-## Roadmap — What's Next
+## Roadmap
 
 The current engine is solid. Here's what's being built on top of it:
 
@@ -311,4 +370,4 @@ Model: `yolov8n` exported to OpenVINO IR format (`yolov8n_openvino_model/`).
 
 ## License
 
-MIT — see `LICENSE` for details.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
