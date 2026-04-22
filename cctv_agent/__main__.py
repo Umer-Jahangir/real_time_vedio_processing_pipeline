@@ -10,18 +10,25 @@ def main():
     parser.add_argument("streams",   nargs="*",     help="Optional stream URLs or video directory")
     args = parser.parse_args()
 
+    # Parse server argument (host:port or just host)
+    server_host = args.server
+    server_port = 8000  # default port
+    if ':' in args.server:
+        server_host, server_port = args.server.split(':', 1)
+        server_port = int(server_port)
+
     # Always use hostname as node ID unless user explicitly overrides
     # This means zero config needed — just run and connect
     node_id = args.node_id or socket.gethostname()
 
-    print(f"[Agent] Starting node '{node_id}' -> server {args.server}")
+    print(f"[Agent] Starting node '{node_id}' -> server {server_host}:{server_port}")
 
     from .main import run, collect_video_sources
 
     stream_urls = collect_video_sources(args.streams) if args.streams else []
 
     run(
-        server=args.server,
+        server=f"{server_host}:{server_port}",
         node_id=node_id,
         config_path=args.config,
         stream_urls=stream_urls,
