@@ -1,9 +1,13 @@
 import os
-# Must be set BEFORE any OpenVINO/ultralytics imports.
-# Direct assignment, not setdefault — setdefault won't override inherited
-# env vars. Must be at module top so it runs before import-time initialization.
-os.environ["OMP_NUM_THREADS"] = "4"
-os.environ["OPENVINO_NUM_THREADS"] = "4"
+import psutil as _det_psutil
+
+# setdefault — worker.py sets this first in subprocess context.
+# If detector.py is imported standalone (tests, scripts), this fallback fires.
+# Formula: half of physical cores, minimum 1.
+_det_threads = max(1, (_det_psutil.cpu_count(logical=False) or 2) // 2)
+os.environ.setdefault("OMP_NUM_THREADS",      str(_det_threads))
+os.environ.setdefault("OPENVINO_NUM_THREADS", str(_det_threads))
+del _det_psutil, _det_threads
 
 import shutil
 import logging
