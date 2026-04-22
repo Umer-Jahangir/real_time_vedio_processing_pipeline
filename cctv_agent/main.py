@@ -30,6 +30,10 @@ Key fixes in this version:
 
   5. WARMUP_SKIP_FRAMES=30
      First 30 frames excluded from latency stats.
+
+  6. PHYSICAL CORES REPORTED AT REGISTRATION
+     Central server receives physical_cores so it can cap stream
+     assignments on weak-CPU nodes (e.g. max 1 stream on 4-core machines).
 """
 
 import multiprocessing
@@ -55,7 +59,7 @@ from .utils import compute_fps, summarize_latency, now
 
 log = logging.getLogger("main")
 
-FRAME_SKIP         = 15   # 1 in 15 frames forwarded to reporter
+FRAME_SKIP         = 1   # every frame forwarded to reporter
 WARMUP_SKIP_FRAMES = 30   # frames excluded from latency stats after pipeline start
 
 
@@ -88,24 +92,30 @@ def collect_video_sources(args):
     return sources
 
 
-def draw_boxes(frame, boxes, ids, classes, confs):
+def draw_boxes(frame, boxes, ids, classes, confs, actions=None):
     if boxes is None:
         return frame
-    for box, track_id, cls, conf in zip(boxes, ids, classes, confs):
+    for i, (box, track_id, cls, conf) in enumerate(zip(boxes, ids, classes, confs)):
         x1, y1, x2, y2 = map(int, box)
         track_id = -1 if track_id is None else int(track_id)
         conf     = float(conf)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        
+        # Get action for this person
+        action = actions.get(track_id, "unknown") if actions else "unknown"
+        
         id_text    = f"ID {track_id}"
         class_text = f"{cls}"
+        action_text = f"{action}"
         conf_text  = f"{conf:.2f}"
         font = cv2.FONT_HERSHEY_SIMPLEX
         scale, thickness, padding = 0.5, 2, 4
         (w1, h1), _ = cv2.getTextSize(id_text,    font, scale, thickness)
         (w2, h2), _ = cv2.getTextSize(class_text, font, scale, thickness)
-        (w3, h3), _ = cv2.getTextSize(conf_text,  font, scale, thickness)
-        total_width  = w1 + w2 + w3 + padding * 4
-        label_height = max(h1, h2, h3) + padding * 2
+        (w3, h3), _ = cv2.getTextSize(action_text, font, scale, thickness)
+        (w4, h4), _ = cv2.getTextSize(conf_text,  font, scale, thickness)
+        total_width  = w1 + w2 + w3 + w4 + padding * 5
+        label_height = max(h1, h2, h3, h4) + padding * 2
         cv2.rectangle(frame,
                       (x1, y1 - label_height), (x1 + total_width, y1),
                       (255, 255, 255), -1)
@@ -114,8 +124,10 @@ def draw_boxes(frame, boxes, ids, classes, confs):
                     (x1 + padding, text_y), font, scale, (0, 0, 0), thickness)
         cv2.putText(frame, class_text,
                     (x1 + w1 + padding * 2, text_y), font, scale, (0, 255, 0), thickness)
+        cv2.putText(frame, action_text,
+                    (x1 + w1 + w2 + padding * 3, text_y), font, scale, (255, 165, 0), thickness)
         cv2.putText(frame, conf_text,
-                    (x1 + w1 + w2 + padding * 3, text_y), font, scale, (255, 0, 0), thickness)
+                    (x1 + w1 + w2 + w3 + padding * 4, text_y), font, scale, (255, 0, 0), thickness)
     return frame
 
 
@@ -143,11 +155,6 @@ class _DisplayThread(threading.Thread):
     Runs cv2.imshow and cv2.waitKey in a dedicated daemon thread so that
     Windows message-pump stalls when the window is minimized/hidden do NOT
     block the main result_queue drain loop.
-
-    Communication with main loop via latest_display_state (plain dict, no
-    lock needed — Python dict assignment is atomic for simple value types
-    and worst-case main sees a slightly stale frame, which is fine for a
-    display-only thread).
     """
 
     def __init__(self, stop_event, quit_event, num_streams,
@@ -156,7 +163,7 @@ class _DisplayThread(threading.Thread):
         self._stop_event           = stop_event
         self._quit_event           = quit_event
         self._num_streams          = num_streams
-        self._stats_ref            = stats_ref            # reference to main stats dict
+        self._stats_ref            = stats_ref
         self._latest_display_state = latest_display_state
         self._interval             = 1.0 / max(fps_cap, 1)
         self._window_created       = False
@@ -184,16 +191,13 @@ class _DisplayThread(threading.Thread):
                             (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 tile_w = dashboard.shape[1] // max(self._num_streams, 1)
                 for i in range(self._num_streams):
-                    s      = self._stats_ref.get(i, {})
+                    s       = self._stats_ref.get(i, {})
                     fps_val = s.get("live_fps", 0.0)
                     cv2.putText(dashboard, f"S{i} {fps_val:.1f}fps",
                                 (i * tile_w + 5, 55),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
                 cv2.imshow("CCTV Dashboard", dashboard)
 
-            # waitKey must be called from the same thread as imshow.
-            # If the window is minimized this may stall briefly — that only
-            # affects THIS thread, not the main drain loop.
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 self._quit_event.set()
@@ -330,7 +334,7 @@ def _run_pipeline(stream_urls: list, cfg, outer_stop: multiprocessing.Event,
 
                     (_, idx,
                      boxes, track_ids, classes, confs, labels,
-                     capture_time, model_lat, e2e_lat) = msg
+                     capture_time, model_lat, e2e_lat, actions) = msg
 
                     s = stats[idx]
                     s["frames"] += 1
@@ -350,7 +354,7 @@ def _run_pipeline(stream_urls: list, cfg, outer_stop: multiprocessing.Event,
 
                     # Read from display shm slot 2 — zero pickle cost
                     raw_frame = shm_display_views[idx].copy()
-                    annotated = draw_boxes(raw_frame, boxes, track_ids, labels, confs)
+                    annotated = draw_boxes(raw_frame, boxes, track_ids, labels, confs, actions)
                     latest_frames[idx] = annotated
 
                     det_list = []
@@ -358,6 +362,7 @@ def _run_pipeline(stream_urls: list, cfg, outer_stop: multiprocessing.Event,
                         det_list = [
                             {
                                 "label":    labels[j] if j < len(labels) else "?",
+                                "action":   actions.get(track_ids[j] if track_ids is not None else j, "unknown") if actions else "unknown",
                                 "conf":     float(confs[j]) if confs is not None else 0.0,
                                 "track_id": int(track_ids[j]) if track_ids is not None else -1,
                                 "box":      [float(x) for x in boxes[j]],
@@ -444,7 +449,6 @@ def _run_pipeline(stream_urls: list, cfg, outer_stop: multiprocessing.Event,
                         log.info(line)
                 last_log_time = now_t
 
-            # Yield briefly if queue was empty this tick
             if drained == 0:
                 time.sleep(0.001)
 
@@ -508,8 +512,18 @@ def run(server=None, node_id=None, config_path=None, stream_urls=None):
     cfg = Config.load(config_path)
 
     if server:
-        cfg._data.setdefault("central", {})["host"] = server
-        cfg._ns.central.host = server
+        # Parse server as host:port
+        if ':' in server:
+            host, port = server.split(':', 1)
+            port = int(port)
+        else:
+            host = server
+            port = cfg.get('central.port', 8000)
+        
+        cfg._data.setdefault("central", {})["host"] = host
+        cfg._data.setdefault("central", {})["port"] = port
+        cfg._ns.central.host = host
+        cfg._ns.central.port = port
     if node_id:
         cfg._data.setdefault("node", {})["id"] = node_id
         cfg._ns.node.id = node_id
@@ -553,7 +567,7 @@ def run(server=None, node_id=None, config_path=None, stream_urls=None):
     if stream_urls is None:
         stream_urls = []
 
-    agent_mode = len(stream_urls) == 0
+    agent_mode = server is not None
     outer_stop = multiprocessing.Event()
 
     reporter_q = multiprocessing.Queue(maxsize=256)
@@ -568,16 +582,29 @@ def run(server=None, node_id=None, config_path=None, stream_urls=None):
             import platform, psutil as _psutil
             base = f"http://{cfg.central.host}:{cfg.central.port}"
             requests.post(f"{base}/register", json={
-                "node_id":     cfg.node.id,
-                "hostname":    _socket.gethostname(),
-                "cpu_cores":   _psutil.cpu_count(logical=True),
-                "ram_gb":      round(_psutil.virtual_memory().total / (1024 ** 3), 1),
-                "max_streams": cfg.get("node.max_streams", 4),
-                "platform":    platform.system(),
+                "node_id":        cfg.node.id,
+                "hostname":       _socket.gethostname(),
+                "cpu_cores":      _psutil.cpu_count(logical=True),
+                "physical_cores": _psutil.cpu_count(logical=False) or 1,  # ← server uses this to cap streams
+                "ram_gb":         round(_psutil.virtual_memory().total / (1024 ** 3), 1),
+                "max_streams":    cfg.get("node.max_streams", 4),
+                "platform":       platform.system(),
             }, timeout=3)
             print("[Main] Registered with central server.")
         except Exception as e:
             print(f"[Main] Could not register: {e}")
+
+        if stream_urls:
+            base = f"http://{cfg.central.host}:{cfg.central.port}"
+            for url in stream_urls:
+                try:
+                    r = requests.post(f"{base}/streams/add", json={"url": url}, timeout=3)
+                    if r.status_code == 200:
+                        print(f"[Main] Added stream to pool: {url}")
+                    else:
+                        print(f"[Main] Failed to add stream: {r.text}")
+                except Exception as e:
+                    print(f"[Main] Error adding stream {url}: {e}")
 
         while True:
             try:
