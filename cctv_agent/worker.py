@@ -1,8 +1,58 @@
 import os
-# Must be set BEFORE ultralytics/OpenVINO are imported.
-# Direct assignment (not setdefault) so inherited env vars are overridden.
-os.environ["OMP_NUM_THREADS"]      = "4"
-os.environ["OPENVINO_NUM_THREADS"] = "4"
+import psutil as _pre_psutil
+
+
+# ============================================================
+# OMP / OPENVINO THREAD COUNT — must run before ANY OpenVINO
+# or ultralytics import. Direct assignment overrides inherited
+# env vars from the parent process.
+#
+# We base the count on actual P-core count, not physical-1:
+#   • physical-1 over-allocates on hybrid CPUs
+#     (e.g. 4P+8E = 12 physical → 11 OMP threads fighting 4 P-cores)
+#   • P-core count matches what inference_worker is pinned to,
+#     so threads never exceed available cores
+# ============================================================
+
+def _early_pcore_ids():
+    """
+    Lightweight P-core detection that runs at import time, before
+    psutil is fully initialized. Safe to call in spawned subprocesses.
+
+    Returns a list of logical core indices that will be used for inference.
+    Never returns an empty list — minimum is [0].
+    """
+    total = _pre_psutil.cpu_count(logical=True) or 1
+    freqs = _pre_psutil.cpu_freq(percpu=True)
+
+    # No per-core freq data (VM, macOS, old CPU) — use first half
+    if not freqs or len(freqs) < 2:
+        half = max(1, total // 2)
+        return list(range(min(half, total)))
+
+    max_freq = max((f.max for f in freqs if f is not None), default=0)
+    if max_freq == 0:
+        # Can't distinguish cores — treat all as P-cores
+        return list(range(total))
+
+    threshold = max_freq * 0.9
+    pcores    = [i for i, f in enumerate(freqs)
+                 if f is not None and f.max >= threshold]
+
+    # Fallback: freq detection returned nothing useful
+    return pcores if pcores else list(range(max(1, total // 2)))
+
+
+_PCORE_IDS_EARLY = _early_pcore_ids()
+_INFER_THREADS   = max(1, len(_PCORE_IDS_EARLY))   # never 0
+
+os.environ["OMP_NUM_THREADS"]      = str(_INFER_THREADS)
+os.environ["OPENVINO_NUM_THREADS"] = str(_INFER_THREADS)
+
+del _pre_psutil   # don't leak into module namespace
+
+
+# ── Now safe to import OpenVINO-backed libraries ──────────────────────────────
 
 import cv2
 import time
@@ -15,6 +65,7 @@ import supervision as sv
 from multiprocessing import shared_memory
 
 from .detector import Detector
+from .action_classifier import ActionClassifier
 from .utils import now, latency_ms
 from .config import Config, get_config
 
@@ -26,8 +77,7 @@ from .config import Config, get_config
 def _set_timer_resolution():
     """
     Set Windows timer resolution to 1ms in THIS process.
-    Must be called independently in every spawned subprocess —
-    the setting is per-process and is NOT inherited from the parent.
+    Must be called in every spawned subprocess — not inherited from parent.
     """
     try:
         ctypes.windll.winmm.timeBeginPeriod(1)
@@ -40,26 +90,82 @@ def _set_timer_resolution():
 # ============================================================
 
 def get_pcore_logical_ids():
+    """
+    Returns P-core (high-frequency) logical CPU IDs.
+
+    Handles four real-world cases:
+      A. Hybrid CPU (Intel 12th gen+): detects via max-freq threshold
+      B. Uniform CPU (all same freq, desktop/server): returns all cores
+      C. No per-core freq info (VM / macOS psutil limit): first half
+      D. Single or dual core machine: returns [0] — never empty
+    """
+    total = psutil.cpu_count(logical=True) or 1
     freqs = psutil.cpu_freq(percpu=True)
+
+    # Case C / D — no per-core frequency data
     if not freqs or len(freqs) < 2:
-        total_logical = psutil.cpu_count(logical=True)
-        return list(range(4)) if total_logical > 8 else list(range(total_logical))
-    max_freq  = max(f.max for f in freqs if f is not None)
+        half = max(1, total // 2)
+        return list(range(min(half, total)))   # clamp — never exceed total
+
+    max_freq = max((f.max for f in freqs if f is not None), default=0)
+    if max_freq == 0:
+        return list(range(total))              # Case B fallback
+
     threshold = max_freq * 0.9
-    return [i for i, f in enumerate(freqs) if f is not None and f.max >= threshold]
+    pcores    = [i for i, f in enumerate(freqs)
+                 if f is not None and f.max >= threshold]
+
+    # Case B: all cores same freq → all are "P-cores"
+    # Case D: detection returned empty (guard)
+    return pcores if pcores else list(range(total))
 
 
-def assign_cores_hybrid(worker_index, num_decoders, cores_per_decoder, is_inference=False):
-    total_logical = psutil.cpu_count(logical=True)
+def assign_cores_hybrid(worker_index, num_decoders, cores_per_decoder,
+                        is_inference=False):
+    """
+    Assigns logical CPU cores with zero overlap between inference and decoders
+    wherever the hardware allows it.
+
+    Strategy:
+      - Inference always gets all P-cores.
+      - Decoders get E-cores when available (zero overlap).
+      - No-E-core machines: P-cores are split — inference keeps first N cores,
+        decoders are assigned the remaining ones. Overlap is minimised but
+        cannot be fully eliminated on ≤2-core machines; a warning is printed.
+    """
+    total_logical = psutil.cpu_count(logical=True) or 1
     pcore_ids     = get_pcore_logical_ids()
     ecore_ids     = [i for i in range(total_logical) if i not in pcore_ids]
+
     if is_inference:
-        return pcore_ids
-    start, end = worker_index * cores_per_decoder, (worker_index + 1) * cores_per_decoder
-    if end > len(ecore_ids):
-        print(f"Warning: insufficient E-cores for decoder {worker_index}, using any cores.")
-        return list(range(total_logical))[start:end]
-    return ecore_ids[start:end]
+        return pcore_ids   # full P-core set — matches OMP_NUM_THREADS above
+
+    # ── Has E-cores — zero overlap guaranteed ────────────────────────────────
+    if ecore_ids:
+        start, end = worker_index * cores_per_decoder, (worker_index + 1) * cores_per_decoder
+        if end <= len(ecore_ids):
+            return ecore_ids[start:end]
+        # More decoders than E-cores — share within E-core pool
+        print(f"Warning: insufficient E-cores for decoder {worker_index}, sharing E-cores.")
+        slot = (worker_index * cores_per_decoder) % len(ecore_ids)
+        return [ecore_ids[slot]]
+
+    # ── No E-cores — split P-cores to minimise overlap ───────────────────────
+    # Reserve first (num_pcores - num_decoders) P-cores for inference.
+    # Give each decoder one of the last P-cores. OS affinity hints mean
+    # the scheduler will mostly keep them separate even if sets overlap.
+    num_pcores     = len(pcore_ids)
+    infer_reserved = max(1, num_pcores - num_decoders)
+    decoder_pool   = pcore_ids[infer_reserved:]
+
+    if not decoder_pool:
+        # Absolute last resort: 1- or 2-core machine
+        decoder_pool = pcore_ids[-1:]
+
+    slot = worker_index % len(decoder_pool)
+    print(f"Warning: no E-cores — decoder {worker_index} sharing P-core "
+          f"{decoder_pool[slot]} with inference.")
+    return [decoder_pool[slot]]
 
 
 def _resolve_config(cfg_dict):
@@ -91,7 +197,8 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
 
     p = psutil.Process()
     try:
-        core_ids = assign_cores_hybrid(index, num_decoders, cores_per_decoder, is_inference=False)
+        core_ids = assign_cores_hybrid(index, num_decoders, cores_per_decoder,
+                                       is_inference=False)
         p.cpu_affinity(core_ids)
         print(f"[Decoder {index}] Pinned to cores {core_ids}")
         log.info(f"Pinned to cores {core_ids}")
@@ -136,10 +243,10 @@ def decoder_worker(index, stream_url, shm_names, frame_shape,
     print(f"[Decoder {index}] Started for {stream_url}")
 
     pace_sleep = 0.033
-    PACE_MIN   = cfg.decoder.pace_min
-    PACE_MAX   = cfg.get("decoder.pace_max_rtsp", cfg.decoder.pace_max)
-    ALPHA_UP   = cfg.decoder.alpha_up
-    ALPHA_DOWN = cfg.decoder.alpha_down
+    PACE_MIN             = cfg.decoder.pace_min
+    PACE_MAX             = cfg.get("decoder.pace_max_rtsp", cfg.decoder.pace_max)
+    ALPHA_UP             = cfg.decoder.alpha_up
+    ALPHA_DOWN           = cfg.decoder.alpha_down
     READ_STALL_THRESHOLD = cfg.pipeline.stall_threshold_ms
 
     if os.path.isfile(stream_url):
@@ -279,9 +386,10 @@ def inference_worker(num_streams, frame_shape, shm_names,
 
     p = psutil.Process()
     try:
-        core_ids = assign_cores_hybrid(0, num_decoders, cores_per_decoder, is_inference=True)
+        core_ids = assign_cores_hybrid(0, num_decoders, cores_per_decoder,
+                                       is_inference=True)
         if not core_ids:
-            core_ids = [psutil.cpu_count(logical=False) - 1]
+            core_ids = [0]
         p.cpu_affinity(core_ids)
         log.info(f"Pinned to cores {core_ids}")
         print(f"[Inference] Pinned to cores {core_ids}")
@@ -289,6 +397,7 @@ def inference_worker(num_streams, frame_shape, shm_names,
         log.warning(f"Affinity error: {e}")
 
     detector    = Detector()
+    action_clf  = ActionClassifier()
     class_names = detector.model.names
 
     # 3 slots per stream: [stream_idx][slot_idx]
@@ -360,6 +469,7 @@ def inference_worker(num_streams, frame_shape, shm_names,
 
             # Tracking
             boxes = classes = confs = labels = track_ids = None
+            actions = {}
 
             if res.boxes is not None:
                 boxes   = res.boxes.xyxy.cpu().numpy()
@@ -375,6 +485,9 @@ def inference_worker(num_streams, frame_shape, shm_names,
                 confs     = tracked.confidence
                 track_ids = tracked.tracker_id
 
+                # Detect actions for persons
+                actions = action_clf.update_frame(frame, boxes, track_ids)
+
             # Metadata-only result message — NO frame array.
             # Pickle: ~2KB instead of ~245KB.
             msg = (
@@ -389,6 +502,7 @@ def inference_worker(num_streams, frame_shape, shm_names,
                 meta["timestamp"],
                 model_ms,
                 e2e_lat,
+                actions,  # ← Add actions
             )
 
             try:
