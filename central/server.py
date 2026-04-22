@@ -224,12 +224,27 @@ def _check_detection_summary():
         if not counts:
             continue
         node_id, stream_id = key.split(":", 1)
-        parts = ", ".join(f"{label}: {cnt}" for label, cnt in
-                          sorted(counts.items(), key=lambda x: -x[1]))
+        
+        # Separate objects and actions
+        objects = {k: v for k, v in counts.items() if not k.startswith("action_")}
+        actions = {k.replace("action_", ""): v for k, v in counts.items() if k.startswith("action_")}
+        
+        parts = []
+        if objects:
+            obj_parts = ", ".join(f"{label}: {cnt}" for label, cnt in
+                                  sorted(objects.items(), key=lambda x: -x[1]))
+            parts.append(obj_parts)
+        if actions:
+            act_parts = ", ".join(f"{action}: {cnt}" for action, cnt in
+                                  sorted(actions.items(), key=lambda x: -x[1]))
+            parts.append(f"Activities: {act_parts}")
+        
+        message = " | ".join(parts)
+        
         _push_alert(
             "summary", "info",
             f"60s Summary — {node_id}/{_stream_name(node_id, stream_id)}",
-            parts,
+            message,
             node_id=node_id,
             stream_id=stream_id,
         )
@@ -383,7 +398,12 @@ async def ingest_detections(request: Request):
     # Accumulate detection counts for summary
     for det in data.get("detections", []):
         label = det.get("label", "unknown")
+        action = det.get("action", "unknown")
         detection_counts[key][label] += 1
+        # Also count actions for activity summary
+        if action != "unknown":
+            action_key = f"action_{action}"
+            detection_counts[key][action_key] += 1
 
     # Save snapshot on detection if recording enabled
     if RECORDING_ENABLED and data.get("detections"):
@@ -411,7 +431,7 @@ async def _mjpeg_gen(node_id: str, stream_id: int):
         if frame:
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
                    + frame + b"\r\n")
-        await asyncio.sleep(0.033)
+        await asyncio.sleep(0.05)
 
 
 @app.get("/streams/{node_id}/{stream_id}/mjpeg")
@@ -429,8 +449,25 @@ async def add_stream(request: Request):
     url  = data.get("url")
     if not url:
         raise HTTPException(400, "url required")
-    stream_pool.setdefault(url, None)
+    stream_pool[url] = None
     log.info(f"Stream added: {url}")
+    
+    # Auto-assign to available node
+    for nid, info in nodes.items():
+        if info.get("status") == "online":
+            assigned = [u for u, n in stream_pool.items() if n == nid]
+            if len(assigned) < info.get("max_streams", 4):
+                stream_pool[url] = nid
+                log.info(f"Auto-assigned {url} → {nid}")
+                name = url.replace("\\", "/").rstrip("/").split("/")[-1] or url
+                _push_alert(
+                    "stream_health", "info",
+                    f"Stream auto-assigned to {nid}",
+                    f"{name} is now being processed by {nid}",
+                    node_id=nid,
+                )
+                break
+    
     return {"status": "ok", "stream_pool": stream_pool}
 
 
@@ -493,11 +530,12 @@ async def get_nodes():
 @app.get("/stats")
 async def get_stats():
     return {
-        "nodes":        list(nodes.values()),
-        "stream_pool":  stream_pool,
-        "stream_stats": stream_stats,
-        "alert_count":  len(alerts),
-        "server_time":  time.time(),   # let dashboard compute accurate age
+        "nodes":            list(nodes.values()),
+        "stream_pool":      stream_pool,
+        "stream_stats":     stream_stats,
+        "latest_detections": latest_detections,
+        "alert_count":      len(alerts),
+        "server_time":      time.time(),   # let dashboard compute accurate age
     }
 
 
@@ -531,5 +569,5 @@ async def root():
 # ── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print(f"[Server] Starting on http://{cfg.server.host}:{cfg.server.port}")
-    uvicorn.run("server:app", host=cfg.server.host,
+    uvicorn.run(app, host=cfg.server.host,
                 port=cfg.server.port, reload=False, log_level="warning")
