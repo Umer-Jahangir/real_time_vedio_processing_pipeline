@@ -18,26 +18,18 @@ def compute_fps(frames, duration):
     return frames / duration
 
 
-# ---------- Advanced Metrics ----------
-
 def percentile(data, p):
-    """
-    Compute percentile (e.g., p=95 for P95 latency)
-    """
+    """Compute percentile (e.g., p=95 for P95 latency)."""
     if not data:
         return 0.0
     return statistics.quantiles(data, n=100)[p - 1]
 
 
 def summarize_latency(latencies):
-    """
-    Returns avg, p95, max latency
-    """
+    """Returns avg, p95, max latency."""
     if not latencies:
         return 0.0, 0.0, 0.0
-
-    avg = sum(latencies) / len(latencies)
-    p95 = percentile(latencies, 95)
+    avg     = sum(latencies) / len(latencies)
+    p95     = percentile(latencies, 95)
     maximum = max(latencies)
-
     return avg, p95, maximum
