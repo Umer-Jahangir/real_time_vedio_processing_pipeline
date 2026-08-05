@@ -1,25 +1,19 @@
-# Real-Time Distributed CCTV Monitoring System
+# Real-Time Distributed Human Activity Recognition CCTV Monitoring System
 
-A high-performance, scalable CCTV monitoring system designed for real-time multi-stream object detection using YOLOv8 and OpenVINO on CPU. The system enables edge nodes to auto-register with a central server, facilitating seamless deployment and management without manual configuration.
+A high-performance, scalable CCTV monitoring system designed for real-time multi-stream Human Activity detection using YOLOv8 and OpenVINO on CPU. The system enables edge nodes to auto-register with a central server, facilitating seamless deployment and management without manual configuration.
 
 ## Table of Contents
 
 - [Project Overview](#project-overview)
 - [What It Does](#what-it-does)
-- [How It Works](#how-it-works)
-- [Current Implementation](#current-implementation)
+- [How It Works](#how-it-works)          
 - [Benchmark Results](#benchmark-results)
 - [Architecture](#architecture)
 - [Folder Structure](#folder-structure)
 - [Installation](#installation)
 - [Usage](#usage)
-- [Node Registration Flow](#node-registration-flow)
 - [Dashboard Interface](#dashboard-interface)
-- [Roadmap](#roadmap)
 - [Advantages](#advantages)
-- [Requirements](#requirements)
-- [License](#license)
-- [Requirements](#requirements)
 - [License](#license)
 
 ---
@@ -32,7 +26,7 @@ This project implements a distributed CCTV monitoring system comprising two prim
 
 The Real-Time Distributed CCTV Monitoring System provides:
 
-- **Real-Time Object Detection**: Processes multiple video streams simultaneously using YOLOv8 for accurate object detection.
+- **Real-Time Activity Detection**: Processes multiple video streams simultaneously using YOLOv8 and behaviour file for detect (Walking, Sitting, Standing, Runnning).
 - **Distributed Architecture**: Centralizes control while distributing computation to edge nodes for optimal performance.
 - **Automated Node Management**: Edge agents auto-register with the central server, eliminating manual setup.
 - **Live Monitoring Dashboard**: Offers a web interface for overseeing node status, stream assignments, and performance metrics.
@@ -67,17 +61,6 @@ The system operates through a client-server architecture:
 - Requires no manual configuration on the node side.
 
 ---
-
-## Current Implementation
-
-The current version (`src/main.py`) is a standalone multi-stream inference engine that serves as the core pipeline for the edge agent. It handles:
-
-- **CPU affinity pinning** — Each decoder is pinned to 2 physical cores; inference uses 4 dedicated cores.
-- **Multi-stream decoding** — Each stream runs in its own thread with frame-paced playback (25 FPS for local files).
-- **YOLOv8n OpenVINO inference** — Single shared inference worker in LATENCY mode (batch=1) on CPU.
-- **System monitoring** — Tracks CPU and RAM usage throughout the session.
-- **Performance reporting** — Per-pipeline FPS, model latency (avg/P95/max), and end-to-end latency on shutdown.
-- **Zero frame drops** — All sessions ended with `Dropped=0` across all decoders.
 
 ### Supported Input Sources
 - Local video files (`.mp4`, `.avi`, etc.)
@@ -227,28 +210,7 @@ pip install -r cctv_agent/requirements.txt
 # Or for development: pip install -e .
 ```
 
-### Production Installation
-For production deployment, install the packaged versions:
-- **Edge Agent**: `pip install https://github.com/<your_username>/<repo>/releases/download/v1.0.0/cctv_agent-1.0.0.tar.gz`
-- **Central Server**: `pip install https://github.com/<your_username>/<repo>/releases/download/v1.0.0/cctv_central-1.0.0.tar.gz`
-
----
-
 ## Usage
-
-### Current Standalone Version
-
-```bash
-cd src
-
-# Local video files
-python main.py path/to/videos/
-
-# RTSP streams
-python main.py rtsp://192.168.1.10:8554/cam1 rtsp://192.168.1.10:8554/cam2
-
-# Press 'q' to quit — performance report prints on exit
-```
 
 ### Central Server
 
@@ -269,75 +231,9 @@ The node auto-registers, downloads its configuration and model, and streams appe
 
 ---
 
-## Node Registration Flow
-
-```
-Edge Node Startup
-      │
-      ▼
-POST /register  ──────────────────────────────────────────▶  Central Server
-{                                                              │
-  "node_id": "node_02",                                       │ Assigns streams,
-  "hardware": {                                               │ model URL, settings
-    "cpu_cores": 8,                                           │
-    "ram_gb": 16,                                             ▼
-    "platform": "Windows"                           Response to Node:
-  }                                                 {
-}                                                     "streams": ["rtsp://cam4", "rtsp://cam5"],
-                                                      "model_url": "http://server/models/yolov8n.pt",
-                                                      "settings": { "imgsz": 320, "confidence": 0.25 }
-                                                    }
-      │
-      ▼
-Node downloads model (if not cached)
-      │
-      ▼
-Pipelines start → Stats reported back to server every N seconds
-```
-
----
-
 ## Dashboard Interface
 
-- **Node management panel** — online/offline status, CPU usage, streams assigned per node.
-- **Stream assignment** — drag-and-drop or dropdown to assign RTSP streams to nodes.
-- **Auto rebalance** — distribute streams evenly across available nodes.
-- **Add new streams** — paste an RTSP URL, assign to a node, done.
-- **Live stats** — per-node FPS, model latency, and E2E latency updated in real time.
-
----
-
-## Roadmap
-
-The current engine is solid. Here's what's being built on top of it:
-
-### Phase 1 — Central Server + REST API
-- [ ] FastAPI server with `/register`, `/config`, `/stats` endpoints
-- [ ] Model file hosting and download endpoint
-- [ ] Node registry with heartbeat tracking (mark nodes offline after timeout)
-- [ ] Config persistence (YAML or SQLite)
-
-### Phase 2 — Edge Agent Package
-- [ ] Wrap current `main.py` pipeline into `cctv_agent` Python package
-- [ ] `python -m cctv_agent --server <ip>` entry point
-- [ ] Auto-registration on startup with hardware info
-- [ ] Periodic stats push to server (`/stats` POST every 5s)
-- [ ] Model cache: skip download if model already exists locally
-
-### Phase 3 — Dashboard
-- [ ] Node list with status indicators (green/red)
-- [ ] Per-node stream assignment UI
-- [ ] Live FPS and latency display per pipeline
-- [ ] Stream health alerts (dropped frames, stall detection)
-- [ ] Add / remove stream URLs from the UI
-
-### Phase 4 — Production Hardening
-- [ ] RTSP reconnection on stream drop (exponential backoff)
-- [ ] Graceful node restart without losing registration
-- [ ] Multi-model support (assign different models to different nodes)
-- [ ] GPU / NPU inference support (OpenVINO GPU plugin)
-- [ ] Docker packaging for central server
-- [ ] pip-installable release of `cctv_agent` via GitHub Releases
+![Dashboard](./screenshots/dashboard.png)
 
 ---
 
@@ -352,17 +248,6 @@ The current engine is solid. Here's what's being built on top of it:
 - **Cross-platform** — runs on Windows, Linux, and macOS (Python + OpenVINO required).
 
 ---
-
-## Requirements
-
-```
-Python >= 3.9
-ultralytics
-openvino
-opencv-python
-numpy
-psutil
-```
 
 Model: `yolov8n` exported to OpenVINO IR format (`yolov8n_openvino_model/`).
 
